@@ -1,39 +1,69 @@
-import { Component, OnInit } from '@angular/core'
-import { Router } from '@angular/router'
-import { ConfigService } from '@app/+admin/config/shared/config.service'
-import { AuthService, Notifier, ScreenService, ServerService, UserService } from '@app/core'
+import { CommonModule, NgTemplateOutlet } from '@angular/common'
+import { ChangeDetectionStrategy, Component, OnInit, inject } from '@angular/core'
+import { FormsModule, ReactiveFormsModule } from '@angular/forms'
+import { Router, RouterLink } from '@angular/router'
+import { AuthService, Notifier, PasswordConfirmationService, ScreenService, ServerService } from '@app/core'
+import { REQUIRED_EMAIL_VALIDATOR } from '@app/shared/form-validators/common-validators'
 import {
   USER_CHANNEL_NAME_VALIDATOR,
-  USER_EMAIL_VALIDATOR,
-  USER_PASSWORD_OPTIONAL_VALIDATOR,
-  USER_PASSWORD_VALIDATOR,
   USER_ROLE_VALIDATOR,
   USER_USERNAME_VALIDATOR,
   USER_VIDEO_QUOTA_DAILY_VALIDATOR,
-  USER_VIDEO_QUOTA_VALIDATOR
+  USER_VIDEO_QUOTA_VALIDATOR,
+  getUserNewPasswordOptionalValidator,
+  getUserNewPasswordValidator
 } from '@app/shared/form-validators/user-validators'
-import { FormValidatorService } from '@app/shared/shared-forms'
-import { UserCreate, UserRole } from '@shared/models'
+import { AdminConfigService } from '@app/shared/shared-admin/admin-config.service'
+import { FormReactiveService } from '@app/shared/shared-forms/form-reactive.service'
+import { AlertComponent } from '@app/shared/shared-main/common/alert.component'
+import { AccountTokenSessionsComponent } from '@app/shared/shared-users/account-token-sessions.component'
+import { UserAdminService } from '@app/shared/shared-users/user-admin.service'
+import { UserCreate, UserRole } from '@peertube/peertube-models'
+import { ActorAvatarEditComponent } from '../../../../shared/shared-actor-image-edit/actor-avatar-edit.component'
+import { InputTextComponent } from '../../../../shared/shared-forms/input-text.component'
+import { PeertubeCheckboxComponent } from '../../../../shared/shared-forms/peertube-checkbox.component'
+import { SelectCustomValueComponent } from '../../../../shared/shared-forms/select/select-custom-value.component'
+import { BytesPipe } from '../../../../shared/shared-main/common/bytes.pipe'
+import { UserRealQuotaInfoComponent } from '../../../shared/user-real-quota-info.component'
 import { UserEdit } from './user-edit'
+import { UserPasswordComponent } from './user-password.component'
 
 @Component({
   selector: 'my-user-create',
   templateUrl: './user-edit.component.html',
-  styleUrls: [ './user-edit.component.scss' ]
+  styleUrls: [ './user-edit.component.scss' ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [
+    RouterLink,
+    CommonModule,
+    NgTemplateOutlet,
+    ActorAvatarEditComponent,
+    FormsModule,
+    ReactiveFormsModule,
+    InputTextComponent,
+    SelectCustomValueComponent,
+    UserRealQuotaInfoComponent,
+    PeertubeCheckboxComponent,
+    UserPasswordComponent,
+    BytesPipe,
+    AccountTokenSessionsComponent,
+    AlertComponent
+  ]
 })
 export class UserCreateComponent extends UserEdit implements OnInit {
+  protected serverService = inject(ServerService)
+  protected formReactiveService = inject(FormReactiveService)
+  protected configService = inject(AdminConfigService)
+  protected screenService = inject(ScreenService)
+  protected auth = inject(AuthService)
+  private router = inject(Router)
+  private notifier = inject(Notifier)
+  private passwordConfirmation = inject(PasswordConfirmationService)
+  private userAdminService = inject(UserAdminService)
+
   error: string
 
-  constructor (
-    protected serverService: ServerService,
-    protected formValidatorService: FormValidatorService,
-    protected configService: ConfigService,
-    protected screenService: ScreenService,
-    protected auth: AuthService,
-    private router: Router,
-    private notifier: Notifier,
-    private userService: UserService
-  ) {
+  constructor () {
     super()
 
     this.buildQuotaOptions()
@@ -48,11 +78,17 @@ export class UserCreateComponent extends UserEdit implements OnInit {
       videoQuotaDaily: -1
     }
 
+    const passwordConstraints = this.serverService.getHTMLConfig().fieldsConstraints.users.password
+
     this.buildForm({
       username: USER_USERNAME_VALIDATOR,
       channelName: USER_CHANNEL_NAME_VALIDATOR,
-      email: USER_EMAIL_VALIDATOR,
-      password: this.isPasswordOptional() ? USER_PASSWORD_OPTIONAL_VALIDATOR : USER_PASSWORD_VALIDATOR,
+      email: REQUIRED_EMAIL_VALIDATOR,
+
+      password: this.isPasswordOptional()
+        ? getUserNewPasswordOptionalValidator(passwordConstraints.minLength, passwordConstraints.maxLength)
+        : getUserNewPasswordValidator(passwordConstraints.minLength, passwordConstraints.maxLength),
+
       role: USER_ROLE_VALIDATOR,
       videoQuota: USER_VIDEO_QUOTA_VALIDATOR,
       videoQuotaDaily: USER_VIDEO_QUOTA_DAILY_VALIDATOR,
@@ -63,7 +99,7 @@ export class UserCreateComponent extends UserEdit implements OnInit {
   formValidated () {
     this.error = undefined
 
-    const userCreate: UserCreate = this.form.value
+    const userCreate: UserCreate = { ...this.form.value }
 
     userCreate.adminFlags = this.buildAdminFlags(this.form.value)
 
@@ -71,17 +107,21 @@ export class UserCreateComponent extends UserEdit implements OnInit {
     userCreate.videoQuota = parseInt(this.form.value['videoQuota'], 10)
     userCreate.videoQuotaDaily = parseInt(this.form.value['videoQuotaDaily'], 10)
 
-    this.userService.addUser(userCreate)
-      .subscribe({
-        next: () => {
-          this.notifier.success($localize`User ${userCreate.username} created.`)
-          this.router.navigate([ '/admin/users/list' ])
-        },
+    this.passwordConfirmation.runWithPassword({
+      title: $localize`Create an administrator`,
+      message: $localize`Administrators can install plugins, that execute any code on your platform.`,
+      required: parseInt(this.form.value['role'], 10) === UserRole.ADMINISTRATOR,
+      request: currentPassword => this.userAdminService.addUser({ ...userCreate, currentPassword })
+    }).subscribe({
+      next: () => {
+        this.notifier.success($localize`User ${userCreate.username} created.`)
+        this.router.navigate([ '/admin/overview/users/list' ])
+      },
 
-        error: err => {
-          this.error = err.message
-        }
-      })
+      error: err => {
+        this.error = this.passwordConfirmation.buildErrorMessage(err)
+      }
+    })
   }
 
   isCreation () {

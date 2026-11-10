@@ -1,21 +1,53 @@
-import { registerTSPaths } from '../server/helpers/register-ts-paths'
-registerTSPaths()
-
+import { Video, VideoPrivacy } from '@peertube/peertube-models'
+import {
+  createSingleServer,
+  doubleFollow,
+  killallServers,
+  PeerTubeServer,
+  setAccessTokensToServers,
+  waitJobs
+} from '@peertube/peertube-server-commands'
 import autocannon, { printResult } from 'autocannon'
-import { writeJson } from 'fs-extra'
-import { createSingleServer, killallServers, PeerTubeServer, setAccessTokensToServers } from '@shared/extra-utils'
-import { Video, VideoPrivacy } from '@shared/models'
+import { program } from 'commander'
+import { writeJson } from 'fs-extra/esm'
 
+let servers: PeerTubeServer[]
+// First server
 let server: PeerTubeServer
 let video: Video
 let threadId: number
 
-const outfile = process.argv[2]
+program
+  .option('-o, --outfile [outfile]', 'Outfile')
+  .option('--grep [string]', 'Filter tests you want to execute')
+  .option('--url <url>', 'Benchmark an existing instance (for example behind a reverse proxy) instead of spawning local test servers')
+  .option('--username <username>', 'Administrator username of the --url instance', 'root')
+  .option('--password <password>', 'Administrator password of the --url instance')
+  .option('--connections <number>', 'Concurrent connections', v => parseInt(v, 10), 20)
+  .option('--duration <seconds>', 'Duration of each test', v => parseInt(v, 10), 10)
+  .option(
+    '--random-client-ips',
+    'Send a random client IP per connection in the X-Forwarded-For header, so a reverse proxy trusting this header sees many clients'
+  )
+  .description('Run API REST benchmark')
+  .parse(process.argv)
+
+const options = program.opts()
+
+const outfile = options.outfile
+
+if (options.url && !options.password) {
+  console.error('--password is required with --url')
+  process.exit(-1)
+}
 
 run()
-  .catch(err => console.error(err))
+  .catch(err => {
+    console.error(err)
+    process.exitCode = 1
+  })
   .finally(() => {
-    if (server) return killallServers([ server ])
+    if (servers) return killallServers(servers)
   })
 
 function buildAuthorizationHeader () {
@@ -30,6 +62,19 @@ function buildAPHeader () {
   }
 }
 
+function buildJSONHeader () {
+  return {
+    'Content-Type': 'application/json'
+  }
+}
+
+// In 198.18.0.0/15, reserved for benchmarks (RFC 2544)
+function buildRandomClientIP () {
+  const random = (max: number) => Math.floor(Math.random() * max)
+
+  return `198.${18 + random(2)}.${random(256)}.${1 + random(254)}`
+}
+
 async function run () {
   console.log('Preparing server...')
 
@@ -41,7 +86,7 @@ async function run () {
       path: '/accounts/peertube',
       headers: buildAPHeader(),
       expecter: (body, status) => {
-        return status === 200 && body.startsWith('{"type":')
+        return status === 200 && body.startsWith('{"@context":')
       }
     },
     {
@@ -49,7 +94,7 @@ async function run () {
       path: '/videos/watch/' + video.uuid,
       headers: buildAPHeader(),
       expecter: (body, status) => {
-        return status === 200 && body.startsWith('{"type":"Video"')
+        return status === 200 && body.startsWith('{"@context":')
       }
     },
     {
@@ -80,6 +125,13 @@ async function run () {
       path: '/api/v1/videos',
       expecter: (body, status) => {
         return status === 200 && body.startsWith('{"total":10')
+      }
+    },
+    {
+      title: 'API - videos list without count*',
+      path: '/api/v1/videos?skipCount=true',
+      expecter: (body, status) => {
+        return status === 200 && body.startsWith('{"data":[{"')
       }
     },
     {
@@ -137,8 +189,35 @@ async function run () {
       expecter: (body, status) => {
         return status === 200 && body.startsWith('{"client":')
       }
+    },
+    {
+      title: 'API - views with token',
+      method: 'PUT',
+      headers: {
+        ...buildAuthorizationHeader(),
+        ...buildJSONHeader()
+      },
+      body: JSON.stringify({ currentTime: 2 }),
+      path: '/api/v1/videos/' + video.uuid + '/views',
+      expecter: (body, status) => {
+        return status === 204
+      }
+    },
+    {
+      title: 'API - views without token',
+      method: 'POST',
+      headers: buildJSONHeader(),
+      body: JSON.stringify({ currentTime: 2 }),
+      path: '/api/v1/videos/' + video.uuid + '/views',
+      expecter: (body, status) => {
+        return status === 204
+      }
     }
-  ]
+  ].filter(t => {
+    if (!options.grep) return true
+
+    return t.title.includes(options.grep)
+  })
 
   const finalResult: any[] = []
 
@@ -155,20 +234,27 @@ async function run () {
   if (outfile) await writeJson(outfile, finalResult)
 }
 
-function runBenchmark (options: {
+function runBenchmark (test: {
   path: string
-  headers?: { [ id: string ]: string }
+  method?: string
+  body?: string
+  headers?: { [id: string]: string }
   expecter: Function
 }) {
-  const { path, expecter, headers } = options
+  const { method = 'GET', path, body, expecter, headers } = test
 
   return new Promise((res, rej) => {
     autocannon({
       url: server.url + path,
-      connections: 20,
+      method,
+      body,
+      connections: options.connections,
       headers,
       pipelining: 1,
-      duration: 10,
+      duration: options.duration,
+      setupClient: options.randomClientIps
+        ? client => client.setHeaders({ ...headers, 'X-Forwarded-For': buildRandomClientIP() })
+        : undefined,
       requests: [
         {
           onResponse: (status, body) => {
@@ -188,15 +274,91 @@ function runBenchmark (options: {
 }
 
 async function prepare () {
-  server = await createSingleServer(1, {
+  if (options.url) return prepareExistingServer()
+
+  return prepareTestServers()
+}
+
+async function prepareExistingServer () {
+  server = new PeerTubeServer({ url: options.url })
+
+  const user = { username: options.username, password: options.password }
+  const client = await server.login.getClient()
+
+  server.store.client = { id: client.client_id, secret: client.client_secret }
+  server.store.user = user
+  server.accessToken = await server.login.getAccessToken(user)
+
+  const { data } = await server.videos.list({ count: 100 })
+  const existing = data.find(v => v.name === 'my super video 1')
+
+  if (existing) {
+    console.log('Reusing the benchmark data of a previous run.')
+
+    video = existing
+
+    const threads = await server.comments.listThreads({ videoId: video.id, count: 1 })
+    threadId = threads.data[0].id
+
+    return
+  }
+
+  await createBenchmarkData()
+  await waitJobs([ server ])
+}
+
+async function prepareTestServers () {
+  const config = {
     rates_limit: {
       api: {
         max: 5_000_000
+      },
+      login: {
+        max: 5_000_000
+      },
+      signup: {
+        max: 5_000_000
+      },
+      ask_send_email: {
+        max: 5_000_000
+      },
+      receive_client_log: {
+        max: 5_000_000
+      },
+      plugins: {
+        max: 5_000_000
+      },
+      well_known: {
+        max: 5_000_000
+      },
+      feeds: {
+        max: 5_000_000
+      },
+      activity_pub: {
+        max: 5_000_000
+      },
+      client: {
+        max: 5_000_000
       }
     }
-  })
-  await setAccessTokensToServers([ server ])
+  }
 
+  servers = await Promise.all([
+    createSingleServer(1, config, { nodeArgs: [ '--inspect=9230' ] }),
+    createSingleServer(2, config),
+    createSingleServer(3, config)
+  ])
+  server = servers[0]
+
+  await setAccessTokensToServers(servers)
+  await doubleFollow(servers[0], servers[1])
+  await doubleFollow(servers[0], servers[2])
+
+  await createBenchmarkData()
+  await waitJobs(servers)
+}
+
+async function createBenchmarkData () {
   const attributes = {
     name: 'my super video',
     category: 2,
@@ -205,13 +367,15 @@ async function prepare () {
     language: 'fr',
     privacy: VideoPrivacy.PUBLIC,
     support: 'please give me a coffee',
-    description: 'my super description'.repeat(10),
+    description: 'my super description\n'.repeat(10) + ' * list1\n * list 2\n * list 3',
     tags: [ 'tag1', 'tag2', 'tag3' ]
   }
 
   for (let i = 0; i < 10; i++) {
     await server.videos.upload({ attributes: { ...attributes, name: 'my super video ' + i } })
   }
+
+  await waitJobs(servers ?? [ server ])
 
   const { data } = await server.videos.list()
   video = data.find(v => v.name === 'my super video 1')
@@ -238,6 +402,4 @@ async function prepare () {
       fixture: 'subtitle-good2.vtt'
     })
   }
-
-  return { server, video, threadId }
 }

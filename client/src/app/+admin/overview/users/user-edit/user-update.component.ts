@@ -1,39 +1,72 @@
-import { Subscription } from 'rxjs'
-import { Component, OnDestroy, OnInit } from '@angular/core'
-import { ActivatedRoute, Router } from '@angular/router'
-import { ConfigService } from '@app/+admin/config/shared/config.service'
-import { AuthService, Notifier, ScreenService, ServerService, User, UserService } from '@app/core'
+import { CommonModule, NgTemplateOutlet } from '@angular/common'
+import { ChangeDetectionStrategy, Component, OnDestroy, OnInit, inject } from '@angular/core'
+import { FormsModule, ReactiveFormsModule } from '@angular/forms'
+import { ActivatedRoute, Router, RouterLink } from '@angular/router'
+import { AuthService, Notifier, PasswordConfirmationService, ScreenService, ServerService, User, UserService } from '@app/core'
+import { REQUIRED_EMAIL_VALIDATOR } from '@app/shared/form-validators/common-validators'
 import {
-  USER_EMAIL_VALIDATOR,
   USER_ROLE_VALIDATOR,
   USER_VIDEO_QUOTA_DAILY_VALIDATOR,
   USER_VIDEO_QUOTA_VALIDATOR
 } from '@app/shared/form-validators/user-validators'
-import { FormValidatorService } from '@app/shared/shared-forms'
-import { User as UserType, UserAdminFlag, UserRole, UserUpdate } from '@shared/models'
+import { AdminConfigService } from '@app/shared/shared-admin/admin-config.service'
+import { FormReactiveService } from '@app/shared/shared-forms/form-reactive.service'
+import { AlertComponent } from '@app/shared/shared-main/common/alert.component'
+import { AccountTokenSessionsComponent } from '@app/shared/shared-users/account-token-sessions.component'
+import { TwoFactorService } from '@app/shared/shared-users/two-factor.service'
+import { UserAdminService } from '@app/shared/shared-users/user-admin.service'
+import { UserAdminFlag, UserRole, User as UserType, UserUpdate } from '@peertube/peertube-models'
+import { Subscription } from 'rxjs'
+import { ActorAvatarEditComponent } from '../../../../shared/shared-actor-image-edit/actor-avatar-edit.component'
+import { InputTextComponent } from '../../../../shared/shared-forms/input-text.component'
+import { PeertubeCheckboxComponent } from '../../../../shared/shared-forms/peertube-checkbox.component'
+import { SelectCustomValueComponent } from '../../../../shared/shared-forms/select/select-custom-value.component'
+import { BytesPipe } from '../../../../shared/shared-main/common/bytes.pipe'
+import { UserRealQuotaInfoComponent } from '../../../shared/user-real-quota-info.component'
 import { UserEdit } from './user-edit'
+import { UserPasswordComponent } from './user-password.component'
 
 @Component({
   selector: 'my-user-update',
   templateUrl: './user-edit.component.html',
-  styleUrls: [ './user-edit.component.scss' ]
+  styleUrls: [ './user-edit.component.scss' ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [
+    RouterLink,
+    NgTemplateOutlet,
+    ActorAvatarEditComponent,
+    FormsModule,
+    ReactiveFormsModule,
+    CommonModule,
+    InputTextComponent,
+    SelectCustomValueComponent,
+    UserRealQuotaInfoComponent,
+    PeertubeCheckboxComponent,
+    UserPasswordComponent,
+    AccountTokenSessionsComponent,
+    BytesPipe,
+    AlertComponent
+  ]
 })
 export class UserUpdateComponent extends UserEdit implements OnInit, OnDestroy {
+  protected formReactiveService = inject(FormReactiveService)
+  protected serverService = inject(ServerService)
+  protected configService = inject(AdminConfigService)
+  protected screenService = inject(ScreenService)
+  protected auth = inject(AuthService)
+  private route = inject(ActivatedRoute)
+  private router = inject(Router)
+  private notifier = inject(Notifier)
+  private passwordConfirmation = inject(PasswordConfirmationService)
+  private userService = inject(UserService)
+  private twoFactorService = inject(TwoFactorService)
+  private userAdminService = inject(UserAdminService)
+
   error: string
 
   private paramsSub: Subscription
 
-  constructor (
-    protected formValidatorService: FormValidatorService,
-    protected serverService: ServerService,
-    protected configService: ConfigService,
-    protected screenService: ScreenService,
-    protected auth: AuthService,
-    private route: ActivatedRoute,
-    private router: Router,
-    private notifier: Notifier,
-    private userService: UserService
-  ) {
+  constructor () {
     super()
 
     this.buildQuotaOptions()
@@ -49,7 +82,7 @@ export class UserUpdateComponent extends UserEdit implements OnInit, OnDestroy {
     }
 
     this.buildForm({
-      email: USER_EMAIL_VALIDATOR,
+      email: REQUIRED_EMAIL_VALIDATOR,
       role: USER_ROLE_VALIDATOR,
       videoQuota: USER_VIDEO_QUOTA_VALIDATOR,
       videoQuotaDaily: USER_VIDEO_QUOTA_DAILY_VALIDATOR,
@@ -77,7 +110,7 @@ export class UserUpdateComponent extends UserEdit implements OnInit, OnDestroy {
   formValidated () {
     this.error = undefined
 
-    const userUpdate: UserUpdate = this.form.value
+    const userUpdate: UserUpdate = { ...this.form.value }
     userUpdate.adminFlags = this.buildAdminFlags(this.form.value)
 
     // A select in HTML is always mapped as a string, we convert it to number
@@ -86,17 +119,35 @@ export class UserUpdateComponent extends UserEdit implements OnInit, OnDestroy {
 
     if (userUpdate.pluginAuth === 'null') userUpdate.pluginAuth = null
 
-    this.userService.updateUser(this.user.id, userUpdate)
-      .subscribe({
-        next: () => {
-          this.notifier.success($localize`User ${this.user.username} updated.`)
-          this.router.navigate([ '/admin/users/list' ])
-        },
+    this.passwordConfirmation.runWithPassword({
+      title: $localize`Update ${this.user.username}`,
+      message: this.user.role.id === UserRole.ADMINISTRATOR
+        ? $localize`${this.user.username} is an administrator.`
+        : $localize`Administrators can install plugins, that execute any code on your platform.`,
+      required: this.isAdminRoleOrCredentialsUpdate(),
+      request: currentPassword => this.userAdminService.updateUser(this.user.id, { ...userUpdate, currentPassword })
+    }).subscribe({
+      next: () => {
+        this.notifier.success($localize`User ${this.user.username} updated.`)
+        this.router.navigate([ '/admin/overview/users/list' ])
+      },
 
-        error: err => {
-          this.error = err.message
-        }
-      })
+      error: err => {
+        this.error = this.passwordConfirmation.buildErrorMessage(err)
+      }
+    })
+  }
+
+  // Changing the credentials of an administrator would allow to log in as them
+  private isAdminRoleOrCredentialsUpdate () {
+    const { role, email, pluginAuth } = this.form.value
+
+    if (parseInt(role, 10) === UserRole.ADMINISTRATOR && this.user.role.id !== UserRole.ADMINISTRATOR) return true
+    if (this.user.role.id !== UserRole.ADMINISTRATOR) return false
+
+    const newPluginAuth = pluginAuth === 'null' ? null : pluginAuth
+
+    return (email !== undefined && email !== this.user.email) || (newPluginAuth !== undefined && newPluginAuth !== this.user.pluginAuth)
   }
 
   isCreation () {
@@ -118,9 +169,20 @@ export class UserUpdateComponent extends UserEdit implements OnInit, OnDestroy {
           this.notifier.success($localize`An email asking for password reset has been sent to ${this.user.username}.`)
         },
 
-        error: err => {
-          this.error = err.message
-        }
+        error: err => this.notifier.handleError(err)
+      })
+  }
+
+  disableTwoFactorAuth () {
+    this.twoFactorService.disableTwoFactor({ userId: this.user.id })
+      .subscribe({
+        next: () => {
+          this.user.twoFactorEnabled = false
+
+          this.notifier.success($localize`Two factor authentication of ${this.user.username} disabled.`)
+        },
+
+        error: err => this.notifier.handleError(err)
       })
   }
 
@@ -129,7 +191,7 @@ export class UserUpdateComponent extends UserEdit implements OnInit, OnDestroy {
 
     this.form.patchValue({
       email: userJson.email,
-      role: userJson.role.toString(),
+      role: userJson.role.id.toString(),
       videoQuota: userJson.videoQuota,
       videoQuotaDaily: userJson.videoQuotaDaily,
       pluginAuth: userJson.pluginAuth,

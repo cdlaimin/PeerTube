@@ -1,6 +1,7 @@
-import { Validators, AbstractControl } from '@angular/forms'
+import { AbstractControl, Validators } from '@angular/forms'
+import { maxLength, minLength, required, SchemaPath } from '@angular/forms/signals'
+import { VideoPlaylistPrivacy, VideoPlaylistPrivacyType } from '@peertube/peertube-models'
 import { BuildFormValidator } from './form-validator.model'
-import { VideoPlaylistPrivacy } from '@shared/models'
 
 export const VIDEO_PLAYLIST_DISPLAY_NAME_VALIDATOR: BuildFormValidator = {
   VALIDATORS: [
@@ -14,6 +15,14 @@ export const VIDEO_PLAYLIST_DISPLAY_NAME_VALIDATOR: BuildFormValidator = {
     maxlength: $localize`Display name cannot be more than 120 characters long.`
   }
 }
+
+export function playlistDisplayNameValidator (displayName: SchemaPath<string>) {
+  required(displayName, { message: $localize`Display name is required.` })
+  minLength(displayName, 1, { message: $localize`Display name must be at least 1 character long.` })
+  maxLength(displayName, 120, { message: $localize`Display name cannot be more than 120 characters long.` })
+}
+
+// ---------------------------------------------------------------------------
 
 export const VIDEO_PLAYLIST_PRIVACY_VALIDATOR: BuildFormValidator = {
   VALIDATORS: [
@@ -42,7 +51,7 @@ export const VIDEO_PLAYLIST_CHANNEL_ID_VALIDATOR: BuildFormValidator = {
   }
 }
 
-export function setPlaylistChannelValidator (channelControl: AbstractControl, privacy: VideoPlaylistPrivacy) {
+export function setPlaylistChannelValidator (channelControl: AbstractControl, privacy: VideoPlaylistPrivacyType) {
   if (privacy.toString() === VideoPlaylistPrivacy.PUBLIC.toString()) {
     channelControl.setValidators([ Validators.required ])
   } else {

@@ -1,10 +1,13 @@
-import { getAbsoluteAPIUrl } from '@app/helpers'
-import { Actor, Video } from '@app/shared/shared-main'
+import { SafeHtml } from '@angular/platform-browser'
+import { getBackendHost } from '@app/helpers'
 import {
   Account as AccountInterface,
-  VideoComment as VideoCommentServerModel,
-  VideoCommentAdmin as VideoCommentAdminServerModel
-} from '@shared/models'
+  VideoChannelSummary,
+  VideoCommentForAdminOrUser as VideoCommentForAdminOrUserServerModel,
+  VideoComment as VideoCommentServerModel
+} from '@peertube/peertube-models'
+import { Actor } from '../shared-main/account/actor.model'
+import { Video } from '../shared-main/video/video.model'
 
 export class VideoComment implements VideoCommentServerModel {
   id: number
@@ -17,6 +20,7 @@ export class VideoComment implements VideoCommentServerModel {
   updatedAt: Date | string
   deletedAt: Date | string
   isDeleted: boolean
+  heldForReview: boolean
   account: AccountInterface
   totalRepliesFromVideoAuthor: number
   totalReplies: number
@@ -35,6 +39,7 @@ export class VideoComment implements VideoCommentServerModel {
     this.updatedAt = new Date(hash.updatedAt.toString())
     this.deletedAt = hash.deletedAt ? new Date(hash.deletedAt.toString()) : null
     this.isDeleted = hash.isDeleted
+    this.heldForReview = hash.heldForReview
     this.account = hash.account
     this.totalRepliesFromVideoAuthor = hash.totalRepliesFromVideoAuthor
     this.totalReplies = hash.totalReplies
@@ -42,18 +47,16 @@ export class VideoComment implements VideoCommentServerModel {
     if (this.account) {
       this.by = Actor.CREATE_BY_STRING(this.account.name, this.account.host)
 
-      const absoluteAPIUrl = getAbsoluteAPIUrl()
-      const thisHost = new URL(absoluteAPIUrl).host
-      this.isLocal = this.account.host.trim() === thisHost
+      this.isLocal = this.account.host.trim() === getBackendHost()
     }
   }
 }
 
-export class VideoCommentAdmin implements VideoCommentAdminServerModel {
+export class VideoCommentForAdminOrUser implements VideoCommentForAdminOrUserServerModel {
   id: number
   url: string
   text: string
-  textHtml: string
+  textHtml: SafeHtml
 
   threadId: number
   inReplyToCommentId: number
@@ -61,7 +64,14 @@ export class VideoCommentAdmin implements VideoCommentAdminServerModel {
   createdAt: Date | string
   updatedAt: Date | string
 
-  account: AccountInterface & { localUrl?: string }
+  account: AccountInterface & {
+    mutedByInstance: boolean
+    mutedServerByInstance: boolean
+
+    localUrl: string
+    nameWithHostForced: string
+  }
+
   localUrl: string
 
   video: {
@@ -69,15 +79,23 @@ export class VideoCommentAdmin implements VideoCommentAdminServerModel {
     uuid: string
     name: string
     localUrl: string
+
+    channel: VideoChannelSummary
   }
+
+  heldForReview: boolean
+
+  automaticTags: string[]
 
   by: string
 
-  constructor (hash: VideoCommentAdminServerModel, textHtml: string) {
+  constructor (hash: VideoCommentForAdminOrUserServerModel, textHtml: SafeHtml) {
     this.id = hash.id
     this.url = hash.url
     this.text = hash.text
     this.textHtml = textHtml
+
+    this.heldForReview = hash.heldForReview
 
     this.threadId = hash.threadId
     this.inReplyToCommentId = hash.inReplyToCommentId
@@ -85,21 +103,31 @@ export class VideoCommentAdmin implements VideoCommentAdminServerModel {
     this.createdAt = new Date(hash.createdAt.toString())
     this.updatedAt = new Date(hash.updatedAt.toString())
 
+    this.automaticTags = hash.automaticTags
+
     this.video = {
       id: hash.video.id,
       uuid: hash.video.uuid,
       name: hash.video.name,
-      localUrl: Video.buildWatchUrl(hash.video)
+      localUrl: Video.buildWatchUrl(hash.video),
+
+      channel: hash.video.channel
     }
 
     this.localUrl = this.video.localUrl + ';threadId=' + this.threadId
 
-    this.account = hash.account
+    if (hash.account) {
+      this.by = Actor.CREATE_BY_STRING(hash.account.name, hash.account.host)
 
-    if (this.account) {
-      this.by = Actor.CREATE_BY_STRING(this.account.name, this.account.host)
+      this.account = {
+        ...hash.account,
 
-      this.account.localUrl = '/a/' + this.by
+        mutedByInstance: false,
+        mutedServerByInstance: false,
+
+        localUrl: '/a/' + this.by,
+        nameWithHostForced: Actor.CREATE_BY_STRING(hash.account.name, hash.account.host, true)
+      }
     }
   }
 }

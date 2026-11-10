@@ -1,5 +1,7 @@
 import { AbstractControl, ValidatorFn, Validators } from '@angular/forms'
+import { splitAndGetNotEmpty } from '@root-helpers/string'
 import { BuildFormValidator } from './form-validator.model'
+import { unique } from './shared/validator-utils'
 
 export function validateHost (value: string) {
   // Thanks to http://stackoverflow.com/a/106223
@@ -64,34 +66,12 @@ const validHostsOrHandles: ValidatorFn = (control: AbstractControl) => {
 
 // ---------------------------------------------------------------------------
 
-export function splitAndGetNotEmpty (value: string) {
-  return value
-    .split('\n')
-    .filter(line => line && line.length !== 0) // Eject empty hosts
-}
-
-export const unique: ValidatorFn = (control: AbstractControl) => {
-  if (!control.value) return null
-
-  const hosts = splitAndGetNotEmpty(control.value)
-
-  if (hosts.every((host: string) => hosts.indexOf(host) === hosts.lastIndexOf(host))) {
-    return null
-  }
-
-  return {
-    unique: {
-      reason: 'invalid'
-    }
-  }
-}
-
 export const UNIQUE_HOSTS_VALIDATOR: BuildFormValidator = {
   VALIDATORS: [ Validators.required, validHosts, unique ],
   MESSAGES: {
     required: $localize`Domain is required.`,
-    validHosts: $localize`Hosts entered are invalid.`,
-    unique: $localize`Hosts entered contain duplicates.`
+    validHosts: $localize`Domains entered are invalid.`,
+    unique: $localize`Domains entered contain duplicates.`
   }
 }
 
@@ -99,7 +79,7 @@ export const UNIQUE_HOSTS_OR_HANDLE_VALIDATOR: BuildFormValidator = {
   VALIDATORS: [ Validators.required, validHostsOrHandles, unique ],
   MESSAGES: {
     required: $localize`Domain is required.`,
-    validHostsOrHandles: $localize`Hosts or handles are invalid.`,
-    unique: $localize`Hosts or handles contain duplicates.`
+    validHostsOrHandles: $localize`Domains or handles are invalid.`,
+    unique: $localize`Domains or handles contain duplicates.`
   }
 }

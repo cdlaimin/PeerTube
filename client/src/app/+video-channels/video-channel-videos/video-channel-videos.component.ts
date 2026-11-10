@@ -1,51 +1,55 @@
+import { AfterViewInit, Component, OnDestroy, OnInit, inject, viewChild, ChangeDetectionStrategy } from '@angular/core'
+import { ComponentPaginationLight, DisableForReuseHook, HooksService, ScreenService } from '@app/core'
+import { VideoChannel } from '@app/shared/shared-main/channel/video-channel.model'
+import { VideoChannelService } from '@app/shared/shared-main/channel/video-channel.service'
+import { VideoService } from '@app/shared/shared-main/video/video.service'
+import { VideoFilters } from '@app/shared/shared-video-miniature/video-filters.model'
+import { Video, VideoSortField } from '@peertube/peertube-models'
 import { Subscription } from 'rxjs'
-import { first } from 'rxjs/operators'
-import { Component, OnDestroy, OnInit } from '@angular/core'
-import { ComponentPaginationLight, DisableForReuseHook, ScreenService } from '@app/core'
-import { VideoChannel, VideoChannelService, VideoService } from '@app/shared/shared-main'
-import { MiniatureDisplayOptions, VideoFilters } from '@app/shared/shared-video-miniature'
-import { VideoSortField } from '@shared/models/videos'
+import { VideosListComponent } from '../../shared/shared-video-miniature/videos-list.component'
 
 @Component({
   selector: 'my-video-channel-videos',
-  templateUrl: './video-channel-videos.component.html'
+  templateUrl: './video-channel-videos.component.html',
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [ VideosListComponent ]
 })
-export class VideoChannelVideosComponent implements OnInit, OnDestroy, DisableForReuseHook {
+export class VideoChannelVideosComponent implements OnInit, AfterViewInit, OnDestroy, DisableForReuseHook {
+  private screenService = inject(ScreenService)
+  private videoChannelService = inject(VideoChannelService)
+  private videoService = inject(VideoService)
+  private hooks = inject(HooksService)
+
+  readonly videosList = viewChild<VideosListComponent>('videosList')
+
   getVideosObservableFunction = this.getVideosObservable.bind(this)
   getSyndicationItemsFunction = this.getSyndicationItems.bind(this)
 
-  title = $localize`Videos`
   defaultSort = '-publishedAt' as VideoSortField
-
-  displayOptions: MiniatureDisplayOptions = {
-    date: true,
-    views: true,
-    by: false,
-    avatar: false,
-    privacyLabel: true,
-    privacyText: false,
-    state: false,
-    blacklistInfo: false
-  }
 
   videoChannel: VideoChannel
   disabled = false
 
   private videoChannelSub: Subscription
-
-  constructor (
-    private screenService: ScreenService,
-    private videoChannelService: VideoChannelService,
-    private videoService: VideoService
-  ) {
-  }
+  private alreadyLoaded = false
 
   ngOnInit () {
     // Parent get the video channel for us
-    this.videoChannelService.videoChannelLoaded.pipe(first())
+    this.videoChannelSub = this.videoChannelService.videoChannelLoaded
       .subscribe(videoChannel => {
+        if (this.videoChannel?.id === videoChannel.id) return
+
         this.videoChannel = videoChannel
+        if (this.alreadyLoaded) this.videosList().reloadVideos()
+
+        this.hooks.runAction('action:video-channel-videos.video-channel.loaded', 'video-channel', { videoChannel })
+
+        this.alreadyLoaded = true
       })
+  }
+
+  ngAfterViewInit () {
+    this.hooks.runAction('action:video-channel-videos.init', 'video-channel')
   }
 
   ngOnDestroy () {
@@ -53,15 +57,14 @@ export class VideoChannelVideosComponent implements OnInit, OnDestroy, DisableFo
   }
 
   getVideosObservable (pagination: ComponentPaginationLight, filters: VideoFilters) {
-    const params = {
+    return this.videoService.listChannelVideos({
       ...filters.toVideosAPIObject(),
 
       videoPagination: pagination,
       videoChannel: this.videoChannel,
+      includeScheduledLive: true,
       skipCount: true
-    }
-
-    return this.videoService.getVideoChannelVideos(params)
+    })
   }
 
   getSyndicationItems () {
@@ -78,5 +81,9 @@ export class VideoChannelVideosComponent implements OnInit, OnDestroy, DisableFo
 
   enabledForReuse () {
     this.disabled = false
+  }
+
+  onVideosLoaded (videos: Video[]) {
+    this.hooks.runAction('action:video-channel-videos.videos.loaded', 'video-channel', { videos })
   }
 }

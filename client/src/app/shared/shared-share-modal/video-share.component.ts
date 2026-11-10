@@ -1,66 +1,47 @@
-import { Component, ElementRef, Input, ViewChild } from '@angular/core'
-import { DomSanitizer, SafeHtml } from '@angular/platform-browser'
-import { VideoDetails } from '@app/shared/shared-main'
-import { VideoPlaylist } from '@app/shared/shared-video-playlist'
+import { Component, ElementRef, inject, input, model, output, viewChild, ChangeDetectionStrategy } from '@angular/core'
+import { HooksService, ServerService } from '@app/core'
+import { VideoDetails } from '@app/shared/shared-main/video/video-details.model'
 import { NgbModal } from '@ng-bootstrap/ng-bootstrap'
-import { buildPlaylistLink, buildVideoLink, decoratePlaylistLink, decorateVideoLink } from '@shared/core-utils'
-import { VideoCaption, VideoPlaylistPrivacy, VideoPrivacy } from '@shared/models'
-import { buildVideoOrPlaylistEmbed } from '../../../assets/player/utils'
-
-type Customizations = {
-  startAtCheckbox: boolean
-  startAt: number
-
-  stopAtCheckbox: boolean
-  stopAt: number
-
-  subtitleCheckbox: boolean
-  subtitle: string
-
-  loop: boolean
-  originUrl: boolean
-  autoplay: boolean
-  muted: boolean
-  title: boolean
-  warningTitle: boolean
-  controls: boolean
-  peertubeLink: boolean
-}
-
-type TabId = 'url' | 'qrcode' | 'embed'
+import { VideoCaption } from '@peertube/peertube-models'
+import { GlobalIconComponent } from '../shared-icons/global-icon.component'
+import { VideoPlaylist } from '../shared-video-playlist/video-playlist.model'
+import { SharePlaylistComponent } from './share-playlist.component'
+import { ShareVideoComponent } from './share-video.component'
+import { Customizations } from './video-share.model'
 
 @Component({
   selector: 'my-video-share',
   templateUrl: './video-share.component.html',
-  styleUrls: [ './video-share.component.scss' ]
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [
+    GlobalIconComponent,
+    SharePlaylistComponent,
+    ShareVideoComponent
+  ]
 })
 export class VideoShareComponent {
-  @ViewChild('modal', { static: true }) modal: ElementRef
+  private modalService = inject(NgbModal)
+  private server = inject(ServerService)
+  private hooks = inject(HooksService)
 
-  @Input() video: VideoDetails = null
-  @Input() videoCaptions: VideoCaption[] = []
-  @Input() playlist: VideoPlaylist = null
-  @Input() playlistPosition: number = null
+  readonly modal = viewChild<ElementRef>('modal')
+  readonly playlistShare = viewChild(SharePlaylistComponent)
+  readonly videoShare = viewChild(ShareVideoComponent)
 
-  activeVideoId: TabId = 'url'
-  activePlaylistId: TabId = 'url'
+  readonly video = input<VideoDetails>(null)
+  readonly videoCaptions = input<VideoCaption[]>([])
+  readonly playlist = input<VideoPlaylist>(null)
+  readonly playlistPosition = model<number>(null)
+
+  readonly modalClosed = output()
 
   customizations: Customizations
-  isAdvancedCustomizationCollapsed = true
-  includeVideoInPlaylist = false
-
-  playlistEmbedHTML: SafeHtml
-  videoEmbedHTML: SafeHtml
-
-  constructor (
-    private modalService: NgbModal,
-    private sanitizer: DomSanitizer
-  ) { }
 
   show (currentVideoTimestamp?: number, currentPlaylistPosition?: number) {
     let subtitle: string
-    if (this.videoCaptions && this.videoCaptions.length !== 0) {
-      subtitle = this.videoCaptions[0].language.id
+    const videoCaptions = this.videoCaptions()
+    if (videoCaptions && videoCaptions.length !== 0) {
+      subtitle = videoCaptions[0].language.id
     }
 
     this.customizations = new Proxy({
@@ -68,7 +49,7 @@ export class VideoShareComponent {
       startAt: currentVideoTimestamp ? Math.floor(currentVideoTimestamp) : 0,
 
       stopAtCheckbox: false,
-      stopAt: this.video?.duration,
+      stopAt: this.video()?.duration,
 
       subtitleCheckbox: false,
       subtitle,
@@ -79,107 +60,47 @@ export class VideoShareComponent {
       muted: false,
 
       // Embed options
+      embedP2P: this.server.getHTMLConfig().defaults.p2p.embed.enabled,
+      embedPiP: true,
+      onlyEmbedUrl: false,
       title: true,
       warningTitle: true,
-      controls: true,
-      peertubeLink: true
+      controlBar: true,
+      contextMenu: true,
+      peertubeLink: true,
+      responsive: false,
+
+      includeVideoInPlaylist: false
     }, {
       set: (target, prop, value) => {
-        target[prop] = value
+        ;(target as any)[prop] = value
 
-        this.updateEmbedCode()
+        if (prop === 'embedP2P') {
+          // Auto enabled warning title if P2P is enabled
+          this.customizations.warningTitle = value
+        }
+
+        this.onUpdate()
 
         return true
       }
     })
 
-    this.playlistPosition = currentPlaylistPosition
+    this.playlistPosition.set(currentPlaylistPosition)
 
-    this.updateEmbedCode()
+    this.onUpdate()
 
-    this.modalService.open(this.modal, { centered: true })
-  }
+    const activeModal = this.modalService.open(this.modal(), { centered: true })
 
-  getVideoIframeCode () {
-    const embedUrl = decorateVideoLink({ url: this.video.embedUrl, ...this.getVideoOptions() })
-
-    return buildVideoOrPlaylistEmbed(embedUrl, this.video.name)
-  }
-
-  getPlaylistIframeCode () {
-    const embedUrl = decoratePlaylistLink({ url: this.playlist.embedUrl, ...this.getPlaylistOptions() })
-
-    return buildVideoOrPlaylistEmbed(embedUrl, this.playlist.displayName)
-  }
-
-  getVideoUrl () {
-    const url = this.customizations.originUrl
-      ? this.video.url
-      : buildVideoLink(this.video, window.location.origin)
-
-    return decorateVideoLink({
-      url,
-
-      ...this.getVideoOptions()
+    activeModal.shown.subscribe(() => {
+      this.hooks.runAction('action:modal.share.shown', 'video-watch', { video: this.video(), playlist: this.playlist() })
     })
+
+    activeModal.hidden.subscribe(() => this.modalClosed.emit())
   }
 
-  getPlaylistUrl () {
-    const url = buildPlaylistLink(this.playlist)
-    if (!this.includeVideoInPlaylist) return url
-
-    return decoratePlaylistLink({ url, playlistPosition: this.playlistPosition })
-  }
-
-  updateEmbedCode () {
-    if (this.playlist) this.playlistEmbedHTML = this.sanitizer.bypassSecurityTrustHtml(this.getPlaylistIframeCode())
-
-    if (this.video) this.videoEmbedHTML = this.sanitizer.bypassSecurityTrustHtml(this.getVideoIframeCode())
-  }
-
-  notSecure () {
-    return window.location.protocol === 'http:'
-  }
-
-  isVideoInEmbedTab () {
-    return this.activeVideoId === 'embed'
-  }
-
-  isLocalVideo () {
-    return this.video.isLocal
-  }
-
-  isPrivateVideo () {
-    return this.video.privacy.id === VideoPrivacy.PRIVATE
-  }
-
-  isPrivatePlaylist () {
-    return this.playlist.privacy.id === VideoPlaylistPrivacy.PRIVATE
-  }
-
-  private getPlaylistOptions (baseUrl?: string) {
-    return {
-      baseUrl,
-
-      playlistPosition: this.playlistPosition || undefined
-    }
-  }
-
-  private getVideoOptions () {
-    return {
-      startTime: this.customizations.startAtCheckbox ? this.customizations.startAt : undefined,
-      stopTime: this.customizations.stopAtCheckbox ? this.customizations.stopAt : undefined,
-
-      subtitle: this.customizations.subtitleCheckbox ? this.customizations.subtitle : undefined,
-
-      loop: this.customizations.loop,
-      autoplay: this.customizations.autoplay,
-      muted: this.customizations.muted,
-
-      title: this.customizations.title,
-      warningTitle: this.customizations.warningTitle,
-      controls: this.customizations.controls,
-      peertubeLink: this.customizations.peertubeLink
-    }
+  onUpdate () {
+    this.playlistShare()?.onUpdate()
+    this.videoShare()?.onUpdate()
   }
 }

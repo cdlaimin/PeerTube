@@ -1,176 +1,349 @@
-import * as debug from 'debug'
-import { Subject } from 'rxjs'
-import { debounceTime, distinctUntilChanged } from 'rxjs/operators'
-import { AfterViewInit, Component, EventEmitter, Input, OnInit, Output } from '@angular/core'
-import { ActivatedRoute, Params, Router } from '@angular/router'
-import { RestService } from '@app/core'
+import { ChangeDetectionStrategy, Component, OnDestroy, OnInit, computed, inject, input, output, signal } from '@angular/core'
+import { FormsModule } from '@angular/forms'
+import { ActivatedRoute } from '@angular/router'
+import { arrayify } from '@peertube/peertube-core-utils'
+import { NgbDropdown, NgbDropdownMenu, NgbDropdownToggle } from '@ng-bootstrap/ng-bootstrap'
+import { Subscription } from 'rxjs'
+import { SelectOptionsItem } from '../../../types/select-options-item.model'
+import { GlobalIconComponent } from '../shared-icons/global-icon.component'
+import { ButtonComponent } from '../shared-main/buttons/button.component'
+import { PeertubeCheckboxComponent } from './peertube-checkbox.component'
+import { SelectOptionsComponent } from './select/select-options.component'
+import { SelectTagsComponent } from './select/select-tags.component'
 
-export type AdvancedInputFilter = {
+// ---------------------------------------------------------------------------
+// Public types
+// ---------------------------------------------------------------------------
+
+export type TitleFilterDef = {
+  type: 'title'
   title: string
-
-  children: AdvancedInputFilterChild[]
 }
 
-export type AdvancedInputFilterChild = {
+export type OptionsFilterDef<ServiceParameters extends Record<string, any>> = {
+  [Key in Extract<keyof ServiceParameters, string>]-?: {
+    type: 'options'
+    key: Key
+    title: string
+    options: { label: string, value: ServiceParameters[Key] | 'all', default?: true }[]
+  }
+}[Extract<keyof ServiceParameters, string>]
+
+export type CheckboxFilterDef<ServiceParameters extends Record<string, any>> = {
+  type: 'checkbox'
+  key: Extract<keyof ServiceParameters, string>
   label: string
-  value: string
 }
 
-const logger = debug('peertube:AdvancedInputFilterComponent')
+export type CheckboxesFilterDef<ServiceParameters extends Record<string, any>> = {
+  [Key in Extract<keyof ServiceParameters, string>]-?: {
+    type: 'checkboxes'
+    key: Key
+    title: string
+    items: { label: string, value: NonNullable<ServiceParameters[Key]> extends (infer U)[] ? U : never }[]
+  }
+}[Extract<keyof ServiceParameters, string>]
+
+export type SelectFilterDef<ServiceParameters extends Record<string, any>> = {
+  [Key in Extract<keyof ServiceParameters, string>]-?: {
+    type: 'select'
+    key: Key
+    title: string
+    items: SelectOptionsItem<string>[] // Force a string to prevent type issues ("1" !== 1)
+    clearable?: boolean // default true
+    filter?: boolean // default false
+  }
+}[Extract<keyof ServiceParameters, string>]
+
+export type TagsFilterDef<ServiceParameters extends Record<string, any>> = {
+  [Key in Extract<keyof ServiceParameters, string>]-?: {
+    type: 'tags'
+    key: Key
+    title: string
+  }
+}[Extract<keyof ServiceParameters, string>]
+
+export type TextFilterDef<ServiceParameters extends Record<string, any>> = {
+  [Key in Extract<keyof ServiceParameters, string>]-?: {
+    type: 'text'
+    key: Key
+    title: string
+    constraint?: 'numeric'
+    placeholder?: string
+  }
+}[Extract<keyof ServiceParameters, string>]
+
+export type AdvancedFilterDef<ServiceParameters extends Record<string, any> = any> =
+  | TitleFilterDef
+  | OptionsFilterDef<ServiceParameters>
+  | SelectFilterDef<ServiceParameters>
+  | CheckboxFilterDef<ServiceParameters>
+  | CheckboxesFilterDef<ServiceParameters>
+  | TagsFilterDef<ServiceParameters>
+  | TextFilterDef<ServiceParameters>
+
+export function parseQueryParamsToAdvancedFilters<ServiceParameters extends Record<string, any>> (
+  inputFilters: AdvancedFilterDef<ServiceParameters>[],
+  queryParams: Record<string, any>,
+  defaultValues: Partial<ServiceParameters> = {}
+) {
+  const result: Record<string, any> = {}
+
+  for (const def of inputFilters) {
+    if (def.type === 'title') continue
+
+    const key = def.key
+    const raw = queryParams[key]
+
+    if (raw === undefined) {
+      if (defaultValues[key] !== undefined) {
+        result[key] = defaultValues[key]
+        continue
+      }
+
+      if (def.type === 'options') {
+        if (def.options.some(o => o.value === 'all')) {
+          result[key] = 'all'
+          continue
+        }
+      }
+
+      result[key] = undefined
+    } else if (def.type === 'checkbox') {
+      result[key] = raw === 'true'
+    } else if (def.type === 'checkboxes') {
+      result[key] = arrayify(raw).map((v: string) => isNaN(+v) ? v : +v)
+    } else if (def.type === 'tags') {
+      // Handle tags as comma-separated values or array
+      result[key] = Array.isArray(raw) ? raw : (raw ? raw.split(',').map((v: string) => v.trim()) : [])
+    } else if (def.type === 'text') {
+      result[key] = raw
+    } else if (raw === 'true') {
+      result[key] = true
+    } else if (raw === 'false') {
+      result[key] = false
+    } else if (!isNaN(+raw)) {
+      result[key] = +raw
+    } else {
+      result[key] = raw
+    }
+  }
+
+  return result as Partial<ServiceParameters>
+}
+
+// ---------------------------------------------------------------------------
 
 @Component({
   selector: 'my-advanced-input-filter',
   templateUrl: './advanced-input-filter.component.html',
-  styleUrls: [ './advanced-input-filter.component.scss' ]
+  styleUrls: [ './advanced-input-filter.component.scss' ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [
+    NgbDropdown,
+    NgbDropdownToggle,
+    NgbDropdownMenu,
+    GlobalIconComponent,
+    FormsModule,
+    PeertubeCheckboxComponent,
+    SelectOptionsComponent,
+    SelectTagsComponent,
+    ButtonComponent
+  ]
 })
-export class AdvancedInputFilterComponent implements OnInit, AfterViewInit {
-  @Input() filters: AdvancedInputFilter[] = []
-  @Input() emitOnInit = true
+export class AdvancedInputFilterComponent<ServiceParameters extends Record<string, any>> implements OnInit, OnDestroy {
+  private route = inject(ActivatedRoute)
 
-  @Output() search = new EventEmitter<string>()
+  readonly filters = input<AdvancedFilterDef<ServiceParameters>[]>([])
+  readonly defaultValues = input<Partial<ServiceParameters>>()
 
-  searchValue: string
+  readonly filtersChange = output<Partial<ServiceParameters>>()
 
-  private enabledFilters = new Set<string>()
+  /** Draft state while the dropdown is open – not yet applied. */
+  readonly filterState = signal<Partial<ServiceParameters>>({})
 
-  private searchStream: Subject<string>
+  /** Committed/applied state that drives URL params and output emissions. */
+  readonly activeFilters = signal<Partial<ServiceParameters>>({})
 
-  private viewInitialized = false
-  private emitSearchAfterViewInit = false
+  /** Number of active (non-empty) filters for the badge. */
+  readonly activeCount = computed(() => {
+    const active = this.activeFilters()
 
-  constructor (
-    private route: ActivatedRoute,
-    private restService: RestService,
-    private router: Router
-  ) { }
+    return Object.keys(active).filter(k => {
+      const value = active[k]
+      const filter = this.filters().find(f => 'key' in f && f.key === k)
+
+      if (value === undefined || value === 'all') return false
+
+      if (filter?.type === 'checkbox' && value === false) return false
+
+      return true
+    }).length
+  })
+
+  readonly hasFilters = computed(() => this.filters().length > 0)
+
+  private routeSub: Subscription
+  private defaultValuesToLoad: Partial<ServiceParameters> = {}
+
+  // ---------------------------------------------------------------------------
+  // Lifecycle
+  // ---------------------------------------------------------------------------
 
   ngOnInit () {
-    this.initSearchStream()
-    this.listenToRouteSearchChange()
+    this.defaultValuesToLoad = this.defaultValues() || {}
+
+    this.routeSub = this.route.queryParams.subscribe(params => {
+      const initial = parseQueryParamsToAdvancedFilters(this.filters(), params, this.defaultValuesToLoad)
+
+      // Only load defaults values on initial load
+      this.defaultValuesToLoad = {}
+
+      this.filterState.set({ ...initial })
+      this.activeFilters.set({ ...initial })
+    })
   }
 
-  ngAfterViewInit () {
-    this.viewInitialized = true
-
-    // Init after view init to not send an event too early
-    if (this.emitOnInit && this.emitSearchAfterViewInit) this.emitSearch()
+  ngOnDestroy () {
+    this.routeSub?.unsubscribe()
   }
 
-  onInputSearch (event: Event) {
-    this.scheduleSearchUpdate((event.target as HTMLInputElement).value)
+  // ---------------------------------------------------------------------------
+  // Template helpers – options filters
+  // ---------------------------------------------------------------------------
+
+  isOptionSelected (def: OptionsFilterDef<ServiceParameters>, optionValue: string): boolean {
+    const current = this.filterState()[def.key]
+
+    return current === optionValue || current + '' === optionValue
   }
 
-  onResetTableFilter () {
-    this.immediateSearchUpdate('')
+  onOptionClick (def: OptionsFilterDef<ServiceParameters>, optionValue: string) {
+    const current = this.filterState()[def.key]
+
+    // Toggle off if already selected
+    const next = current === optionValue ? undefined : optionValue
+    this.filterState.update(s => ({ ...s, [def.key]: next }))
   }
 
-  hasFilters () {
-    return this.filters && this.filters.length !== 0
+  onOptionInputClick (event: MouseEvent, def: OptionsFilterDef<ServiceParameters>, optionValue: string) {
+    event.preventDefault()
+    this.onOptionClick(def, optionValue)
   }
 
-  isFilterEnabled (filter: AdvancedInputFilterChild) {
-    return this.enabledFilters.has(filter.value)
+  // ---------------------------------------------------------------------------
+  // Template helpers – checkbox filters
+  // ---------------------------------------------------------------------------
+
+  getCheckboxValue (key: string): boolean {
+    return this.filterState()[key] === true
   }
 
-  onFilterClick (filter: AdvancedInputFilterChild) {
-    const newSearch = this.isFilterEnabled(filter)
-      ? this.removeFilterToSearch(this.searchValue, filter)
-      : this.addFilterToSearch(this.searchValue, filter)
-
-    this.router.navigate([ '.' ], { relativeTo: this.route, queryParams: { search: newSearch.trim() } })
+  setCheckboxValue (key: string, value: boolean) {
+    this.filterState.update(s => ({ ...s, [key]: value || undefined }))
   }
 
-  private scheduleSearchUpdate (value: string) {
-    this.searchValue = value
-    this.searchStream.next(this.searchValue)
+  // ---------------------------------------------------------------------------
+  // Template helpers – checkboxes filters
+  // ---------------------------------------------------------------------------
+
+  isCheckboxesItemChecked (key: string, value: unknown): boolean {
+    const current: unknown[] = this.filterState()[key] || []
+
+    return current.includes(value)
   }
 
-  private immediateSearchUpdate (value: string) {
-    this.searchValue = value
+  setCheckboxesItemValue (key: string, value: unknown, checked: boolean) {
+    const current: unknown[] = this.filterState()[key] || []
+    const next = checked
+      ? [ ...current.filter(v => v !== value), value ]
+      : current.filter(v => v !== value)
 
-    this.setQueryParams(this.searchValue)
-    this.parseFilters(this.searchValue)
-    this.emitSearch()
+    this.filterState.update(s => ({ ...s, [key]: next.length > 0 ? next : undefined }))
   }
 
-  private listenToRouteSearchChange () {
-    this.route.queryParams
-      .subscribe(params => {
-        const search = params.search || ''
+  // ---------------------------------------------------------------------------
+  // Template helpers – select filters
+  // ---------------------------------------------------------------------------
 
-        logger('On route search change "%s".', search)
+  getSelectValue (key: string): string | undefined {
+    const v = this.filterState()[key]
 
-        if (this.searchValue === search) return
-
-        this.searchValue = search
-
-        this.parseFilters(this.searchValue)
-
-        this.emitSearch()
-      })
+    return v !== undefined ? String(v) : undefined
   }
 
-  private initSearchStream () {
-    this.searchStream = new Subject()
-
-    this.searchStream
-      .pipe(
-        debounceTime(300),
-        distinctUntilChanged()
-      )
-      .subscribe(() => {
-        this.setQueryParams(this.searchValue)
-        this.parseFilters(this.searchValue)
-
-        this.emitSearch()
-      })
+  setSelectValue (key: string, value: string | undefined) {
+    this.filterState.update(s => ({ ...s, [key]: value ? String(value) : undefined }))
   }
 
-  private emitSearch () {
-    if (!this.viewInitialized) {
-      this.emitSearchAfterViewInit = true
-      return
+  // ---------------------------------------------------------------------------
+  // Template helpers – tags filters
+  // ---------------------------------------------------------------------------
+
+  getTagsValue (key: string): string[] {
+    return this.filterState()[key]
+  }
+
+  setTagsValue (key: string, value: string[]) {
+    this.filterState.update(s => ({ ...s, [key]: value?.length > 0 ? value : undefined }))
+  }
+
+  // ---------------------------------------------------------------------------
+  // Template helpers – text filters
+  // ---------------------------------------------------------------------------
+
+  getTextValue (key: string): string {
+    const value = this.filterState()[key]
+    const filterDef = this.filters().find(f => f.type === 'text' && f.key === key) as TextFilterDef<ServiceParameters>
+
+    if (filterDef.constraint === 'numeric' && isNaN(+value)) return ''
+
+    return value !== undefined ? String(value) : ''
+  }
+
+  setTextValue (key: string, value: string) {
+    let trimmedValue: number | string = value.trim()
+
+    const filterDef = this.filters().find(f => f.type === 'text' && f.key === key) as TextFilterDef<ServiceParameters>
+
+    if (filterDef.constraint === 'numeric') {
+      trimmedValue = +trimmedValue
+
+      if (isNaN(trimmedValue)) trimmedValue = ''
     }
 
-    logger('On search "%s".', this.searchValue)
-
-    this.search.emit(this.searchValue)
+    this.filterState.update(s => ({ ...s, [key]: trimmedValue || undefined }))
   }
 
-  private setQueryParams (search: string) {
-    const queryParams: Params = {}
+  // ---------------------------------------------------------------------------
 
-    if (search) Object.assign(queryParams, { search })
-    this.router.navigate([ ], { queryParams })
+  applyFilters (dropdown: NgbDropdown) {
+    this.activeFilters.set({ ...this.filterState() })
+
+    this.emitOutputs()
+
+    dropdown.close()
   }
 
-  private removeFilterToSearch (search: string, removedFilter: AdvancedInputFilterChild) {
-    return search.replace(removedFilter.value, '')
+  resetFilters (dropdown: NgbDropdown) {
+    const empty: Partial<ServiceParameters> = parseQueryParamsToAdvancedFilters(this.filters(), {}, this.defaultValues())
+
+    this.filterState.set(empty)
+    this.activeFilters.set(empty)
+
+    this.emitOutputs()
+
+    dropdown.close()
   }
 
-  private addFilterToSearch (search: string, newFilter: AdvancedInputFilterChild) {
-    const prefix = newFilter.value.split(':').shift()
-
-    // Tokenize search and remove a potential existing filter
-    const tokens = this.restService.tokenizeString(search)
-                                   .filter(t => !t.startsWith(prefix))
-
-    tokens.push(newFilter.value)
-
-    return tokens.join(' ')
+  onDropdownOpen () {
+    // Sync draft state with committed state when dropdown is re-opened
+    this.filterState.set({ ...this.activeFilters() })
   }
 
-  private parseFilters (search: string) {
-    const tokens = this.restService.tokenizeString(search)
+  private emitOutputs () {
+    const active = this.activeFilters()
 
-    this.enabledFilters = new Set()
-
-    for (const group of this.filters) {
-      for (const filter of group.children) {
-        if (tokens.includes(filter.value)) {
-          this.enabledFilters.add(filter.value)
-        }
-      }
-    }
+    this.filtersChange.emit(active)
   }
 }

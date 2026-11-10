@@ -1,161 +1,60 @@
+import { HttpClient, HttpParams } from '@angular/common/http'
+import { Injectable, inject } from '@angular/core'
+import { RestExtractor, RestPagination, RestService } from '@app/core'
+import { Video } from '@app/shared/shared-main/video/video.model'
+import { VideoListParams, VideoService } from '@app/shared/shared-main/video/video.service'
+import { getAllPrivacies } from '@peertube/peertube-core-utils'
+import { ResultList, VideoInclude } from '@peertube/peertube-models'
 import { Observable } from 'rxjs'
 import { catchError, switchMap } from 'rxjs/operators'
-import { HttpClient, HttpParams } from '@angular/common/http'
-import { Injectable } from '@angular/core'
-import { RestExtractor, RestPagination, RestService } from '@app/core'
-import { AdvancedInputFilter } from '@app/shared/shared-forms'
-import { CommonVideoParams, Video, VideoService } from '@app/shared/shared-main'
-import { ResultList, VideoInclude, VideoPrivacy } from '@shared/models'
-import { getAllPrivacies } from '@shared/core-utils'
 
 @Injectable()
 export class VideoAdminService {
+  private videoService = inject(VideoService)
+  private authHttp = inject(HttpClient)
+  private restExtractor = inject(RestExtractor)
+  private restService = inject(RestService)
 
-  constructor (
-    private videoService: VideoService,
-    private authHttp: HttpClient,
-    private restExtractor: RestExtractor,
-    private restService: RestService
-  ) {}
-
-  getAdminVideos (
-    options: CommonVideoParams & { pagination: RestPagination, search?: string }
+  listAdminVideos (
+    options: VideoListParams & {
+      pagination: RestPagination
+      search?: string
+      excludeMuted?: boolean
+    }
   ): Observable<ResultList<Video>> {
-    const { pagination, search } = options
+    const { pagination, search, excludeMuted, ...listParamsOptions } = options
 
     let params = new HttpParams()
-    params = this.videoService.buildCommonVideosParams({ params, ...options })
+    params = this.videoService.buildVideoListParams({
+      params,
+      ...listParamsOptions,
 
-    params = params.set('start', pagination.start.toString())
-                   .set('count', pagination.count.toString())
+      privacyOneOf: listParamsOptions.privacyOneOf ?? getAllPrivacies()
+    })
 
-    params = this.buildAdminParamsFromSearch(search, params)
-
-    return this.authHttp
-               .get<ResultList<Video>>(VideoService.BASE_VIDEO_URL, { params })
-               .pipe(
-                 switchMap(res => this.videoService.extractVideos(res)),
-                 catchError(err => this.restExtractor.handleError(err))
-               )
-  }
-
-  buildAdminInputFilter (): AdvancedInputFilter[] {
-    return [
-      {
-        title: $localize`Video type`,
-        children: [
-          {
-            value: 'isLive:false',
-            label: $localize`VOD`
-          },
-          {
-            value: 'isLive:true',
-            label: $localize`Live`
-          }
-        ]
-      },
-
-      {
-        title: $localize`Video files`,
-        children: [
-          {
-            value: 'webtorrent:true',
-            label: $localize`With WebTorrent`
-          },
-          {
-            value: 'webtorrent:false',
-            label: $localize`Without WebTorrent`
-          },
-          {
-            value: 'hls:true',
-            label: $localize`With HLS`
-          },
-          {
-            value: 'hls:false',
-            label: $localize`Without HLS`
-          }
-        ]
-      },
-
-      {
-        title: $localize`Videos scope`,
-        children: [
-          {
-            value: 'isLocal:false',
-            label: $localize`Remote videos`
-          },
-          {
-            value: 'isLocal:true',
-            label: $localize`Local videos`
-          }
-        ]
-      },
-
-      {
-        title: $localize`Exclude`,
-        children: [
-          {
-            value: 'excludeMuted',
-            label: $localize`Exclude muted accounts`
-          },
-          {
-            value: 'excludePublic',
-            label: $localize`Exclude public videos`
-          }
-        ]
-      }
-    ]
-  }
-
-  private buildAdminParamsFromSearch (search: string, params: HttpParams) {
     let include = VideoInclude.BLACKLISTED |
       VideoInclude.BLOCKED_OWNER |
       VideoInclude.NOT_PUBLISHED_STATE |
-      VideoInclude.FILES
+      VideoInclude.FILES |
+      VideoInclude.SOURCE |
+      VideoInclude.AUTOMATIC_TAGS
 
-    let privacyOneOf = getAllPrivacies()
+    if (excludeMuted) {
+      include &= ~VideoInclude.BLOCKED_OWNER
+    }
 
-    if (!search) return this.restService.addObjectParams(params, { include, privacyOneOf })
-
-    const filters = this.restService.parseQueryStringFilter(search, {
-      isLocal: {
-        prefix: 'isLocal:',
-        isBoolean: true
-      },
-      hasHLSFiles: {
-        prefix: 'hls:',
-        isBoolean: true
-      },
-      hasWebtorrentFiles: {
-        prefix: 'webtorrent:',
-        isBoolean: true
-      },
-      isLive: {
-        prefix: 'isLive:',
-        isBoolean: true
-      },
-      excludeMuted: {
-        prefix: 'excludeMuted',
-        handler: () => true
-      },
-      excludePublic: {
-        prefix: 'excludePublic',
-        handler: () => true
-      }
+    params = this.restService.addObjectParams(params, {
+      include,
+      search,
+      start: pagination.start,
+      count: pagination.count
     })
 
-    if (filters.excludeMuted) {
-      include &= ~VideoInclude.BLOCKED_OWNER
-
-      filters.excludeMuted = undefined
-    }
-
-    if (filters.excludePublic) {
-      privacyOneOf = [ VideoPrivacy.PRIVATE, VideoPrivacy.UNLISTED, VideoPrivacy.INTERNAL ]
-
-      filters.excludePublic = undefined
-    }
-
-    return this.restService.addObjectParams(params, { ...filters, include, privacyOneOf })
+    return this.authHttp
+      .get<ResultList<Video>>(VideoService.BASE_VIDEO_URL, { params })
+      .pipe(
+        switchMap(res => this.videoService.extractVideos(res)),
+        catchError(err => this.restExtractor.handleError(err))
+      )
   }
 }

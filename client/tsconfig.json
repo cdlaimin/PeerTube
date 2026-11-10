@@ -1,64 +1,64 @@
 {
   "compileOnSave": false,
   "compilerOptions": {
-    "downlevelIteration": true,
-    "outDir": "./dist/out-tsc",
     "sourceMap": true,
     "declaration": false,
-    "moduleResolution": "node",
-    "module": "esnext",
+    "moduleResolution": "bundler",
+    "module": "es2020",
+    "esModuleInterop": true,
     "experimentalDecorators": true,
     "noImplicitAny": true,
     "noImplicitThis": true,
-    "suppressImplicitAnyIndexErrors":true,
     "alwaysStrict": true,
+    "allowJs": true,
     "importHelpers": true,
     "strictBindCallApply": true,
-    "target": "es2015",
+    "target": "ES2022",
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable",
+      "ES2025.Float16"
+    ],
+    "isolatedModules": true,
+    "strictPropertyInitialization": false,
+    "strictNullChecks": false,
     "typeRoots": [
       "node_modules/@types"
     ],
-    "lib": [
-      "es2018",
-      "es2017",
-      "es2016",
-      "es2015",
-      "dom"
-    ],
-    "baseUrl": "./",
     "paths": {
-      "hls.js": [ "node_modules/hls.js/dist/hls.light" ],
-      "video.js": [ "node_modules/video.js/core" ],
-      "@app/*": [ "src/app/*" ],
-      "@shared/models/*": [ "../shared/models/*" ],
-      "@shared/models": [ "../shared/models" ],
-      "@shared/core-utils": [ "../shared/core-utils" ],
-      "@shared/core-utils/*": [ "../shared/core-utils/*" ],
-      "@root-helpers/*": [ "src/root-helpers/*" ],
-      "fs": [ "src/shims/noop.ts" ],
-      "http": [ "src/shims/http.ts" ],
-      "https": [ "src/shims/https.ts" ],
-      "path": [ "src/shims/path.ts" ],
-      "stream": [ "src/shims/stream.ts" ],
-      "crypto": [ "src/shims/noop.ts" ]
+      "@app/*": [
+        "./src/app/*"
+      ],
+      "@root-helpers/*": [
+        "./src/root-helpers/*"
+      ],
+      "@pt-types": [
+        "./src/types"
+      ]
     }
   },
-  "files": [
-    "src/polyfills.ts"
+  "references": [
+    { "path": "../packages/core-utils" },
+    { "path": "../packages/models" },
+    { "path": "../packages/typescript-utils" }
   ],
   "include": [
-    "src/main*.ts",
-    "src/**/*.d.ts",
-    "src/shims/*.ts"
-  ],
-  "exclude": [
-    "../node_modules",
-    "../server",
-    "node_modules"
+    "./src/polyfills.ts",
+    "./src/environments/*.ts",
+    "./src/main*.ts",
+    "./src/**/*.d.ts",
+    "./src/app/**/*.ts",
+    "./src/shims/*.ts"
   ],
   "angularCompilerOptions": {
     "strictInjectionParameters": true,
-    "fullTemplateTypeCheck": true,
+    "extendedDiagnostics": {
+      "checks": {
+        "nullishCoalescingNotNullable": "suppress",
+        "optionalChainNotNullable": "suppress"
+      }
+    },
     "strictTemplates": true,
     "enableI18nLegacyMessageIdFormat": false
   }

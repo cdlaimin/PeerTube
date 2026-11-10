@@ -1,32 +1,43 @@
-import { firstValueFrom } from 'rxjs'
-import { ComponentRef, Injectable } from '@angular/core'
+import { ComponentRef, Injectable, inject } from '@angular/core'
 import { MarkdownService } from '@app/core'
+import { GlobalIconName } from '@app/shared/shared-icons/global-icon.component'
 import {
   ButtonMarkupData,
+  CardMarkupData,
   ChannelMiniatureMarkupData,
   ContainerMarkupData,
   EmbedMarkupData,
+  HeroMarkupData,
+  InstanceAvatarMarkupData,
   PlaylistMiniatureMarkupData,
   VideoMiniatureMarkupData,
   VideosListMarkupData
-} from '@shared/models'
+} from '@peertube/peertube-models'
+import { logger } from '@root-helpers/logger'
 import { DynamicElementService } from './dynamic-element.service'
 import {
   ButtonMarkupComponent,
   ChannelMiniatureMarkupComponent,
   EmbedMarkupComponent,
+  InstanceAvatarMarkupComponent,
+  InstanceBannerMarkupComponent,
   PlaylistMiniatureMarkupComponent,
   VideoMiniatureMarkupComponent,
   VideosListMarkupComponent
 } from './peertube-custom-tags'
 import { CustomMarkupComponent } from './peertube-custom-tags/shared'
 
-type AngularBuilderFunction = (el: HTMLElement) => ComponentRef<CustomMarkupComponent>
+type AngularBuilderFunction = (el: HTMLElement) => { component: ComponentRef<CustomMarkupComponent>, loadedPromise: Promise<boolean> }
 type HTMLBuilderFunction = (el: HTMLElement) => HTMLElement
 
 @Injectable()
 export class CustomMarkupService {
-  private angularBuilders: { [ selector: string ]: AngularBuilderFunction } = {
+  private dynamicElementService = inject(DynamicElementService)
+  private markdown = inject(MarkdownService)
+
+  private angularBuilders: { [selector: string]: AngularBuilderFunction } = {
+    'peertube-instance-banner': el => this.instanceBannerBuilder(el),
+    'peertube-instance-avatar': el => this.instanceAvatarBuilder(el),
     'peertube-button': el => this.buttonBuilder(el),
     'peertube-video-embed': el => this.embedBuilder(el, 'video'),
     'peertube-playlist-embed': el => this.embedBuilder(el, 'playlist'),
@@ -36,16 +47,15 @@ export class CustomMarkupService {
     'peertube-videos-list': el => this.videosListBuilder(el)
   }
 
-  private htmlBuilders: { [ selector: string ]: HTMLBuilderFunction } = {
-    'peertube-container': el => this.containerBuilder(el)
+  private htmlBuilders: { [selector: string]: HTMLBuilderFunction } = {
+    'peertube-container': el => this.containerBuilder(el),
+    'peertube-hero': el => this.heroBuilder(el),
+    'peertube-card': el => this.cardBuilder(el)
   }
 
   private customMarkdownRenderer: (text: string) => Promise<HTMLElement>
 
-  constructor (
-    private dynamicElementService: DynamicElementService,
-    private markdown: MarkdownService
-  ) {
+  constructor () {
     this.customMarkdownRenderer = (text: string) => {
       return this.buildElement(text)
         .then(({ rootElement }) => rootElement)
@@ -57,45 +67,44 @@ export class CustomMarkupService {
   }
 
   async buildElement (text: string) {
-    const html = await this.markdown.customPageMarkdownToHTML(text, this.getSupportedTags())
+    const html = await this.markdown.customPageMarkdownToHTML({ markdown: text, additionalAllowedTags: this.getSupportedTags() })
 
     const rootElement = document.createElement('div')
     rootElement.innerHTML = html
 
     for (const selector of Object.keys(this.htmlBuilders)) {
-      rootElement.querySelectorAll(selector)
-        .forEach((e: HTMLElement) => {
+      rootElement.querySelectorAll<HTMLElement>(selector)
+        .forEach(e => {
           try {
             const element = this.execHTMLBuilder(selector, e)
             // Insert as first child
             e.insertBefore(element, e.firstChild)
           } catch (err) {
-            console.error('Cannot inject component %s.', selector, err)
+            logger.error(`Cannot inject component ${selector}`, err)
           }
         })
     }
 
     const loadedPromises: Promise<boolean>[] = []
 
+    const componentRefs: ComponentRef<CustomMarkupComponent>[] = []
+
     for (const selector of Object.keys(this.angularBuilders)) {
-      rootElement.querySelectorAll(selector)
-        .forEach((e: HTMLElement) => {
+      rootElement.querySelectorAll<HTMLElement>(selector)
+        .forEach(e => {
           try {
-            const component = this.execAngularBuilder(selector, e)
+            const { component, loadedPromise } = this.execAngularBuilder(selector, e)
+            if (loadedPromise) loadedPromises.push(loadedPromise)
 
-            if (component.instance.loaded) {
-              const p = firstValueFrom(component.instance.loaded)
-              loadedPromises.push(p)
-            }
-
+            componentRefs.push(component)
             this.dynamicElementService.injectElement(e, component)
           } catch (err) {
-            console.error('Cannot inject component %s.', selector, err)
+            logger.error(`Cannot inject component ${selector}`, err)
           }
         })
     }
 
-    return { rootElement, componentsLoaded: Promise.all(loadedPromises) }
+    return { rootElement, componentsLoaded: Promise.all(loadedPromises), componentRefs }
   }
 
   private getSupportedTags () {
@@ -113,55 +122,93 @@ export class CustomMarkupService {
 
   private embedBuilder (el: HTMLElement, type: 'video' | 'playlist') {
     const data = el.dataset as EmbedMarkupData
-    const component = this.dynamicElementService.createElement(EmbedMarkupComponent)
+    const { component, loadedPromise } = this.dynamicElementService.createElement(EmbedMarkupComponent)
 
-    this.dynamicElementService.setModel(component, { uuid: data.uuid, type })
+    this.dynamicElementService.setModel(component, {
+      uuid: data.uuid,
+      type,
+      responsive: this.buildBoolean(data.responsive),
+      startAt: data.startAt,
+      stopAt: data.stopAt,
+      subtitle: data.subtitle,
+      autoplay: this.buildBoolean(data.autoplay),
+      muted: this.buildBoolean(data.muted),
+      loop: this.buildBoolean(data.loop),
+      title: this.buildBoolean(data.title),
+      p2p: this.buildBoolean(data.p2p),
+      warningTitle: this.buildBoolean(data.warningTitle),
+      controlBar: this.buildBoolean(data.controlBar),
+      peertubeLink: this.buildBoolean(data.peertubeLink),
+      playlistPosition: this.buildNumber(data.playlistPosition)
+    })
 
-    return component
+    return { component, loadedPromise }
   }
 
   private playlistMiniatureBuilder (el: HTMLElement) {
     const data = el.dataset as PlaylistMiniatureMarkupData
-    const component = this.dynamicElementService.createElement(PlaylistMiniatureMarkupComponent)
+    const { component, loadedPromise } = this.dynamicElementService.createElement(PlaylistMiniatureMarkupComponent)
 
     this.dynamicElementService.setModel(component, { uuid: data.uuid })
 
-    return component
+    return { component, loadedPromise }
   }
 
   private channelMiniatureBuilder (el: HTMLElement) {
     const data = el.dataset as ChannelMiniatureMarkupData
-    const component = this.dynamicElementService.createElement(ChannelMiniatureMarkupComponent)
+    const { component, loadedPromise } = this.dynamicElementService.createElement(ChannelMiniatureMarkupComponent)
 
     const model = {
       name: data.name,
       displayLatestVideo: this.buildBoolean(data.displayLatestVideo) ?? true,
-      displayDescription: this.buildBoolean(data.displayDescription) ?? true
+      displayDescription: this.buildBoolean(data.displayDescription) ?? true,
+      sort: data.sort || '-publishedAt'
     }
 
     this.dynamicElementService.setModel(component, model)
 
-    return component
+    return { component, loadedPromise }
   }
 
   private buttonBuilder (el: HTMLElement) {
     const data = el.dataset as ButtonMarkupData
-    const component = this.dynamicElementService.createElement(ButtonMarkupComponent)
+    const { component, loadedPromise } = this.dynamicElementService.createElement(ButtonMarkupComponent)
 
     const model = {
       theme: data.theme ?? 'primary',
       href: data.href,
+      path: data.path,
       label: data.label,
-      blankTarget: this.buildBoolean(data.blankTarget) ?? false
+      blankTarget: this.buildBoolean(data.blankTarget) ?? false,
+      icon: (data.icon || undefined) as GlobalIconName
     }
     this.dynamicElementService.setModel(component, model)
 
-    return component
+    return { component, loadedPromise }
+  }
+
+  private instanceBannerBuilder (el: HTMLElement) {
+    const { component, loadedPromise } = this.dynamicElementService.createElement(InstanceBannerMarkupComponent)
+
+    return { component, loadedPromise }
+  }
+
+  private instanceAvatarBuilder (el: HTMLElement) {
+    const data = el.dataset as InstanceAvatarMarkupData
+    const { component, loadedPromise } = this.dynamicElementService.createElement(InstanceAvatarMarkupComponent)
+
+    const model = {
+      size: this.buildNumber(data.size)
+    }
+
+    this.dynamicElementService.setModel(component, model)
+
+    return { component, loadedPromise }
   }
 
   private videoMiniatureBuilder (el: HTMLElement) {
     const data = el.dataset as VideoMiniatureMarkupData
-    const component = this.dynamicElementService.createElement(VideoMiniatureMarkupComponent)
+    const { component, loadedPromise } = this.dynamicElementService.createElement(VideoMiniatureMarkupComponent)
 
     const model = {
       uuid: data.uuid,
@@ -170,18 +217,18 @@ export class CustomMarkupService {
 
     this.dynamicElementService.setModel(component, model)
 
-    return component
+    return { component, loadedPromise }
   }
 
   private videosListBuilder (el: HTMLElement) {
     const data = el.dataset as VideosListMarkupData
-    const component = this.dynamicElementService.createElement(VideosListMarkupComponent)
+    const { component, loadedPromise } = this.dynamicElementService.createElement(VideosListMarkupComponent)
 
     const model = {
       onlyDisplayTitle: this.buildBoolean(data.onlyDisplayTitle) ?? false,
       maxRows: this.buildNumber(data.maxRows) ?? -1,
 
-      sort: data.sort || '-publishedAt',
+      sort: data.sort || undefined,
       count: this.buildNumber(data.count) || 10,
 
       categoryOneOf: this.buildArrayNumber(data.categoryOneOf) ?? [],
@@ -189,26 +236,28 @@ export class CustomMarkupService {
 
       accountHandle: data.accountHandle || undefined,
       channelHandle: data.channelHandle || undefined,
+      playlistId: data.playlistId || undefined,
+
+      host: data.host || undefined,
 
       isLive: this.buildBoolean(data.isLive),
 
-      isLocal: this.buildBoolean(data.onlyLocal) ? true : undefined
+      isLocal: this.buildBoolean(data.onlyLocal) ? true : undefined,
+
+      moreHref: data.moreHref || undefined,
+      morePath: data.morePath || undefined,
+      moreLabel: data.moreLabel || undefined
     }
 
     this.dynamicElementService.setModel(component, model)
 
-    return component
+    return { component, loadedPromise }
   }
 
   private containerBuilder (el: HTMLElement) {
     const data = el.dataset as ContainerMarkupData
 
-    // Move inner HTML in the new element we'll create
-    const content = el.innerHTML
-    el.innerHTML = ''
-
-    const root = document.createElement('div')
-    root.innerHTML = content
+    const root = this.moveChildrenInNewElement(el)
 
     const layoutClass = data.layout
       ? 'layout-' + data.layout
@@ -226,19 +275,96 @@ export class CustomMarkupService {
       const headerElement = document.createElement('div')
       headerElement.classList.add('header')
 
+      const headerContentElement = document.createElement('div')
+      headerContentElement.classList.add('header-content')
+      headerElement.appendChild(headerContentElement)
+
       if (data.title) {
         const titleElement = document.createElement('h4')
         titleElement.innerText = data.title
-        headerElement.appendChild(titleElement)
+        headerContentElement.appendChild(titleElement)
       }
 
       if (data.description) {
         const descriptionElement = document.createElement('div')
+        descriptionElement.classList.add('description')
         descriptionElement.innerText = data.description
-        headerElement.append(descriptionElement)
+        headerContentElement.append(descriptionElement)
       }
 
       root.insertBefore(headerElement, root.firstChild)
+    }
+
+    return root
+  }
+
+  private heroBuilder (el: HTMLElement) {
+    const data = el.dataset as HeroMarkupData
+
+    const actions = this.moveChildrenInNewElement(el)
+    actions.classList.add('hero-actions')
+
+    const root = document.createElement('div')
+    root.classList.add('peertube-hero')
+
+    const content = document.createElement('div')
+    content.classList.add('hero-content')
+    root.appendChild(content)
+
+    if (data.title) {
+      const titleElement = document.createElement('h2')
+      titleElement.classList.add('hero-title')
+      titleElement.innerText = data.title
+      content.appendChild(titleElement)
+    }
+
+    if (data.description) {
+      const descriptionElement = document.createElement('div')
+      descriptionElement.classList.add('hero-description')
+      descriptionElement.innerText = data.description
+      content.appendChild(descriptionElement)
+    }
+
+    if (actions.childElementCount !== 0) root.appendChild(actions)
+
+    return root
+  }
+
+  private cardBuilder (el: HTMLElement) {
+    const data = el.dataset as CardMarkupData
+
+    const actions = this.moveChildrenInNewElement(el)
+    actions.classList.add('card-actions')
+
+    const root = document.createElement('div')
+    root.classList.add('peertube-card')
+
+    if (this.buildBoolean(data.bordered)) root.classList.add('bordered')
+
+    if (data.title) {
+      const titleElement = document.createElement('div')
+      titleElement.classList.add('card-title')
+      titleElement.innerText = data.title
+      root.appendChild(titleElement)
+    }
+
+    if (data.description) {
+      const descriptionElement = document.createElement('div')
+      descriptionElement.classList.add('card-description')
+      descriptionElement.innerText = data.description
+      root.appendChild(descriptionElement)
+    }
+
+    if (actions.childElementCount !== 0) root.appendChild(actions)
+
+    return root
+  }
+
+  private moveChildrenInNewElement (el: HTMLElement) {
+    const root = document.createElement('div')
+
+    while (el.firstChild) {
+      root.appendChild(el.firstChild)
     }
 
     return root

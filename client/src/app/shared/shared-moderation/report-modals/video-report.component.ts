@@ -1,40 +1,54 @@
-import { mapValues, pickBy } from 'lodash-es'
-import { Component, Input, OnInit, ViewChild } from '@angular/core'
-import { DomSanitizer } from '@angular/platform-browser'
+import { NgClass } from '@angular/common'
+import { Component, OnInit, inject, input, output, viewChild, ChangeDetectionStrategy } from '@angular/core'
+import { FormsModule, ReactiveFormsModule } from '@angular/forms'
 import { Notifier } from '@app/core'
 import { ABUSE_REASON_VALIDATOR } from '@app/shared/form-validators/abuse-validators'
-import { FormReactive, FormValidatorService } from '@app/shared/shared-forms'
-import { NgbModal } from '@ng-bootstrap/ng-bootstrap'
-import { NgbModalRef } from '@ng-bootstrap/ng-bootstrap/modal/modal-ref'
-import { abusePredefinedReasonsMap } from '@shared/core-utils/abuse'
-import { AbusePredefinedReasonsString } from '@shared/models'
-import { Video } from '../../shared-main'
+import { FormReactive } from '@app/shared/shared-forms/form-reactive'
+import { FormReactiveService } from '@app/shared/shared-forms/form-reactive.service'
+import { Video } from '@app/shared/shared-main/video/video.model'
+import { NgbModal, NgbModalRef } from '@ng-bootstrap/ng-bootstrap'
+import { abusePredefinedReasonsMap } from '@peertube/peertube-core-utils'
+import { AbusePredefinedReasonsString } from '@peertube/peertube-models'
+import { mapValues, pickBy } from 'lodash-es'
+import { PeertubeCheckboxComponent } from '../../shared-forms/peertube-checkbox.component'
+import { TimestampInputComponent } from '../../shared-forms/timestamp-input.component'
+import { GlobalIconComponent } from '../../shared-icons/global-icon.component'
+import { PeerTubeTemplateDirective } from '../../shared-main/common/peertube-template.directive'
+import { EmbedComponent } from '../../shared-main/video/embed.component'
 import { AbuseService } from '../abuse.service'
 
 @Component({
   selector: 'my-video-report',
   templateUrl: './video-report.component.html',
-  styleUrls: [ './report.component.scss' ]
+  styleUrls: [ './report.component.scss' ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [
+    GlobalIconComponent,
+    FormsModule,
+    ReactiveFormsModule,
+    PeertubeCheckboxComponent,
+    PeerTubeTemplateDirective,
+    EmbedComponent,
+    TimestampInputComponent,
+    NgClass
+  ]
 })
 export class VideoReportComponent extends FormReactive implements OnInit {
-  @Input() video: Video = null
+  protected formReactiveService = inject(FormReactiveService)
+  private modalService = inject(NgbModal)
+  private abuseService = inject(AbuseService)
+  private notifier = inject(Notifier)
 
-  @ViewChild('modal', { static: true }) modal: NgbModal
+  readonly video = input<Video>(null)
+
+  readonly modal = viewChild<NgbModal>('modal')
+
+  readonly modalClosed = output()
 
   error: string = null
   predefinedReasons: { id: AbusePredefinedReasonsString, label: string, description?: string, help?: string }[] = []
 
   private openedModal: NgbModalRef
-
-  constructor (
-    protected formValidatorService: FormValidatorService,
-    private modalService: NgbModal,
-    private abuseService: AbuseService,
-    private notifier: Notifier,
-    private sanitizer: DomSanitizer
-  ) {
-    super()
-  }
 
   get currentHost () {
     return window.location.host
@@ -42,7 +56,7 @@ export class VideoReportComponent extends FormReactive implements OnInit {
 
   get originHost () {
     if (this.isRemote()) {
-      return this.video.account.host
+      return this.video().account.host
     }
 
     return ''
@@ -55,7 +69,7 @@ export class VideoReportComponent extends FormReactive implements OnInit {
   ngOnInit () {
     this.buildForm({
       reason: ABUSE_REASON_VALIDATOR,
-      predefinedReasons: mapValues(abusePredefinedReasonsMap, r => null),
+      predefinedReasons: mapValues(abusePredefinedReasonsMap, _ => null as any),
       timestamp: {
         hasStart: null,
         startAt: null,
@@ -64,11 +78,13 @@ export class VideoReportComponent extends FormReactive implements OnInit {
       }
     })
 
-    this.predefinedReasons = this.abuseService.getPrefefinedReasons('video')
+    this.predefinedReasons = this.abuseService.getPredefinedReasons('video')
   }
 
   show () {
-    this.openedModal = this.modalService.open(this.modal, { centered: true, keyboard: false, size: 'lg' })
+    this.openedModal = this.modalService.open(this.modal(), { centered: true, keyboard: false, size: 'lg' })
+
+    this.openedModal.hidden.subscribe(() => this.modalClosed.emit())
   }
 
   hide () {
@@ -85,7 +101,8 @@ export class VideoReportComponent extends FormReactive implements OnInit {
       reason,
       predefinedReasons,
       video: {
-        id: this.video.id,
+        // Use the UUID: it is required by the server to report unlisted and password protected videos
+        id: this.video().uuid,
         startAt: hasStart && startAt ? startAt : undefined,
         endAt: hasEnd && endAt ? endAt : undefined
       }
@@ -95,11 +112,11 @@ export class VideoReportComponent extends FormReactive implements OnInit {
         this.hide()
       },
 
-      error: err => this.notifier.error(err.message)
+      error: err => this.notifier.handleError(err)
     })
   }
 
   isRemote () {
-    return !this.video.isLocal
+    return !this.video().isLocal
   }
 }

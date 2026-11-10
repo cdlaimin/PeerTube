@@ -1,61 +1,64 @@
+import { ChangeDetectionStrategy, ChangeDetectorRef, Component, OnInit, inject, input, model, output } from '@angular/core'
+import { Notifier, User, UserService } from '@app/core'
+import { Video } from '@app/shared/shared-main/video/video.model'
+import { FindInBulkService } from '@app/shared/shared-search/find-in-bulk.service'
+import { objectKeysTyped } from '@peertube/peertube-core-utils'
 import { finalize } from 'rxjs/operators'
-import { Component, EventEmitter, Input, OnInit, Output } from '@angular/core'
-import { AuthService, Notifier } from '@app/core'
-import { FindInBulkService } from '@app/shared/shared-search'
-import { Video } from '../../shared-main'
-import { MiniatureDisplayOptions } from '../../shared-video-miniature'
+import { MiniatureDisplayOptions, VideoMiniatureComponent } from '../../shared-video-miniature/video-miniature.component'
 import { CustomMarkupComponent } from './shared'
 
 /*
  * Markup component that creates a video miniature only
-*/
+ */
 
 @Component({
   selector: 'my-video-miniature-markup',
   templateUrl: 'video-miniature-markup.component.html',
-  styleUrls: [ 'video-miniature-markup.component.scss' ]
+  styleUrls: [ 'video-miniature-markup.component.scss' ],
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  imports: [ VideoMiniatureComponent ]
 })
 export class VideoMiniatureMarkupComponent implements CustomMarkupComponent, OnInit {
-  @Input() uuid: string
-  @Input() onlyDisplayTitle: boolean
-  @Input() video: Video
+  private findInBulk = inject(FindInBulkService)
+  private notifier = inject(Notifier)
+  private userService = inject(UserService)
+  private cd = inject(ChangeDetectorRef)
 
-  @Output() loaded = new EventEmitter<boolean>()
+  readonly uuid = input<string>(undefined)
+  readonly onlyDisplayTitle = input<boolean>(undefined)
+  readonly video = model<Video>(undefined)
+
+  readonly loaded = output<boolean>()
 
   displayOptions: MiniatureDisplayOptions = {
     date: true,
     views: true,
     by: true,
-    avatar: false,
-    privacyLabel: false,
-    privacyText: false,
-    state: false,
-    blacklistInfo: false
+    avatar: true,
+    privacyLabel: false
   }
 
-  constructor (
-    private auth: AuthService,
-    private findInBulk: FindInBulkService,
-    private notifier: Notifier
-  ) { }
-
-  getUser () {
-    return this.auth.getUser()
-  }
+  user: User
 
   ngOnInit () {
-    if (this.onlyDisplayTitle) {
-      for (const key of Object.keys(this.displayOptions)) {
+    if (this.onlyDisplayTitle()) {
+      for (const key of objectKeysTyped(this.displayOptions)) {
         this.displayOptions[key] = false
       }
     }
 
-    if (this.video) return
+    this.userService.getAnonymousOrLoggedUser()
+      .subscribe(user => this.user = user)
 
-    this.findInBulk.getVideo(this.uuid)
+    if (this.video()) return
+
+    this.findInBulk.getVideo(this.uuid())
       .pipe(finalize(() => this.loaded.emit(true)))
       .subscribe({
-        next: video => this.video = video,
+        next: video => {
+          this.video.set(video)
+          this.cd.markForCheck()
+        },
 
         error: err => this.notifier.error($localize`Error in video miniature component: ${err.message}`)
       })

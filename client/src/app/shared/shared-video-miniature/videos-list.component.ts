@@ -1,325 +1,278 @@
-import * as debug from 'debug'
-import { fromEvent, Observable, Subject, Subscription } from 'rxjs'
-import { debounceTime, switchMap } from 'rxjs/operators'
-import { Component, EventEmitter, Input, OnChanges, OnDestroy, OnInit, Output, SimpleChanges } from '@angular/core'
+import { CommonModule } from '@angular/common'
+import { ChangeDetectionStrategy, Component, DestroyRef, OnInit, booleanAttribute, inject, input, output } from '@angular/core'
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop'
 import { ActivatedRoute } from '@angular/router'
-import { AuthService, ComponentPaginationLight, Notifier, PeerTubeRouterService, ScreenService, User, UserService } from '@app/core'
-import { GlobalIconName } from '@app/shared/shared-icons'
-import { isLastMonth, isLastWeek, isThisMonth, isToday, isYesterday } from '@shared/core-utils'
-import { ResultList, UserRight, VideoSortField } from '@shared/models'
-import { Syndication, Video } from '../shared-main'
-import { VideoFilters, VideoFilterScope } from './video-filters.model'
-import { MiniatureDisplayOptions } from './video-miniature.component'
+import {
+  ComponentPagination,
+  ComponentPaginationLight,
+  Notifier,
+  PeerTubeRouterService,
+  ScreenService,
+  User,
+  UserService,
+  resetCurrentPage,
+  updatePaginationOnDelete
+} from '@app/core'
+import { GlobalIconComponent, GlobalIconName } from '@app/shared/shared-icons/global-icon.component'
+import { ResultList, VideoSortField } from '@peertube/peertube-models'
+import { logger } from '@root-helpers/logger'
+import debug from 'debug'
+import { Observable, Subject, forkJoin, fromEvent, of } from 'rxjs'
+import { concatMap, debounceTime, map, switchMap } from 'rxjs/operators'
+import { ButtonComponent } from '../shared-main/buttons/button.component'
+import { InfiniteScrollerDirective } from '../shared-main/common/infinite-scroller.directive'
+import { DateGroupLabelComponent, GroupDate, GroupDateLabels } from '../shared-main/date/date-group-label.component'
+import { Syndication } from '../shared-main/feeds/syndication.model'
+import { Video } from '../shared-main/video/video.model'
+import { VideoFiltersHeaderComponent } from './video-filters-header.component'
+import { VideoFilterScope, VideoFilters } from './video-filters.model'
+import { MiniatureDisplayOptions, VideoMiniatureComponent } from './video-miniature.component'
 
-const logger = debug('peertube:videos:VideosListComponent')
+const debugLogger = debug('peertube:videos:VideosListComponent')
 
 export type HeaderAction = {
   iconName: GlobalIconName
   label: string
-  justIcon?: boolean
   routerLink?: string
-  href?: string
-  click?: (e: Event) => void
-}
-
-enum GroupDate {
-  UNKNOWN = 0,
-  TODAY = 1,
-  YESTERDAY = 2,
-  THIS_WEEK = 3,
-  THIS_MONTH = 4,
-  LAST_MONTH = 5,
-  OLDER = 6
 }
 
 @Component({
   selector: 'my-videos-list',
   templateUrl: './videos-list.component.html',
-  styleUrls: [ './videos-list.component.scss' ]
+  styleUrls: [ './videos-list.component.scss' ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [
+    CommonModule,
+    ButtonComponent,
+    ButtonComponent,
+    VideoFiltersHeaderComponent,
+    InfiniteScrollerDirective,
+    VideoMiniatureComponent,
+    GlobalIconComponent,
+    DateGroupLabelComponent
+  ]
 })
-export class VideosListComponent implements OnInit, OnChanges, OnDestroy {
-  @Input() getVideosObservableFunction: (pagination: ComponentPaginationLight, filters: VideoFilters) => Observable<ResultList<Video>>
-  @Input() getSyndicationItemsFunction: (filters: VideoFilters) => Promise<Syndication[]> | Syndication[]
-  @Input() baseRouteBuilderFunction: (filters: VideoFilters) => string[]
+export class VideosListComponent implements OnInit {
+  private destroyRef = inject(DestroyRef)
+  private notifier = inject(Notifier)
+  private userService = inject(UserService)
+  private route = inject(ActivatedRoute)
+  private screenService = inject(ScreenService)
+  private peertubeRouter = inject(PeerTubeRouterService)
 
-  @Input() title: string
-  @Input() titleTooltip: string
-  @Input() displayTitle = true
+  // dprint-ignore
+  // eslint-disable-next-line max-len
+  readonly getVideosObservableFunction = input<(pagination: ComponentPaginationLight, filters: VideoFilters) => Observable<ResultList<Video>>>(undefined)
+  readonly getSyndicationItemsFunction = input<(filters: VideoFilters) => Promise<Syndication[]> | Syndication[]>(undefined)
 
-  @Input() defaultSort: VideoSortField
-  @Input() defaultScope: VideoFilterScope = 'federated'
-  @Input() displayFilters = false
-  @Input() displayModerationBlock = false
+  readonly defaultSort = input<VideoSortField>(undefined)
+  readonly defaultScope = input<VideoFilterScope>('federated')
+  readonly displayFilters = input(false, { transform: booleanAttribute })
+  readonly displayBy = input(true, { transform: booleanAttribute })
+  readonly hideScopeFilter = input(false, { transform: booleanAttribute })
 
-  @Input() loadUserVideoPreferences = false
+  readonly loadUserVideoPreferences = input(false, { transform: booleanAttribute })
 
-  @Input() displayAsRow = false
-  @Input() displayVideoActions = true
-  @Input() groupByDate = false
+  readonly displayAsRow = input(false, { transform: booleanAttribute })
+  readonly displayVideoActions = input(true, { transform: booleanAttribute })
+  readonly groupByDate = input(false, { transform: booleanAttribute })
+  readonly highlightLives = input(false, { transform: booleanAttribute })
 
-  @Input() headerActions: HeaderAction[] = []
+  readonly headerActions = input<HeaderAction[]>([])
 
-  @Input() hideScopeFilter = false
+  readonly disabled = input(false, { transform: booleanAttribute })
 
-  @Input() displayOptions: MiniatureDisplayOptions = {
-    date: true,
-    views: true,
-    by: true,
-    avatar: false,
-    privacyLabel: true,
-    privacyText: false,
-    state: false,
-    blacklistInfo: false
-  }
-
-  @Input() disabled = false
-
-  @Output() filtersChanged = new EventEmitter<VideoFilters>()
+  readonly filtersChanged = output<VideoFilters>()
+  readonly videosLoaded = output<Video[]>()
 
   videos: Video[] = []
+  highlightedLives: Video[] = []
+
   filters: VideoFilters
   syndicationItems: Syndication[]
 
-  onDataSubject = new Subject<any[]>()
+  onVideosDataSubject = new Subject<any[]>()
   hasDoneFirstQuery = false
 
-  userMiniature: User
+  user: User
 
-  private routeSub: Subscription
-  private userSub: Subscription
-  private resizeSub: Subscription
+  displayOptions: MiniatureDisplayOptions = {
+    date: true,
+    views: true,
+    by: true,
+    avatar: true,
+    privacyLabel: true
+  }
+  displayModerationBlock = true
 
-  private pagination: ComponentPaginationLight = {
-    currentPage: 1,
-    itemsPerPage: 25
+  groupByDateStore = new Set<number>()
+  groupedDateLabels: GroupDateLabels = {
+    [GroupDate.TODAY]: $localize`Today's videos`,
+    [GroupDate.YESTERDAY]: $localize`Yesterday's videos`,
+    [GroupDate.THIS_WEEK]: $localize`This week's videos`,
+    [GroupDate.THIS_MONTH]: $localize`This month's videos`,
+    [GroupDate.LAST_MONTH]: $localize`Last month's videos`,
+    [GroupDate.OLDER]: $localize`Older videos`
   }
 
-  private groupedDateLabels: { [id in GroupDate]: string }
-  private groupedDates: { [id: number]: GroupDate } = {}
+  private pagination: ComponentPagination = {
+    currentPage: 1,
+    itemsPerPage: 25,
+    totalItems: null
+  }
 
   private lastQueryLength: number
 
-  constructor (
-    private notifier: Notifier,
-    private authService: AuthService,
-    private userService: UserService,
-    private route: ActivatedRoute,
-    private screenService: ScreenService,
-    private peertubeRouter: PeerTubeRouterService
-  ) {
-
-  }
+  private videoRequests = new Subject<{
+    reset: boolean
+    obsVideos: Observable<Pick<ResultList<Video>, 'data'>>
+    obsHighlightedLives: Observable<Pick<ResultList<Video>, 'data'>>
+  }>()
 
   ngOnInit () {
-    const hiddenFilters = this.hideScopeFilter
+    this.displayOptions.by = this.displayBy()
+    this.displayOptions.avatar = this.displayBy()
+
+    this.subscribeToVideoRequests()
+
+    const hiddenFilters = this.hideScopeFilter()
       ? [ 'scope' ]
       : []
 
-    this.filters = new VideoFilters(this.defaultSort, this.defaultScope, hiddenFilters)
-    this.filters.load({ ...this.route.snapshot.queryParams, scope: this.defaultScope })
+    this.filters = new VideoFilters(this.defaultSort(), this.defaultScope(), hiddenFilters)
 
-    this.groupedDateLabels = {
-      [GroupDate.UNKNOWN]: null,
-      [GroupDate.TODAY]: $localize`Today`,
-      [GroupDate.YESTERDAY]: $localize`Yesterday`,
-      [GroupDate.THIS_WEEK]: $localize`This week`,
-      [GroupDate.THIS_MONTH]: $localize`This month`,
-      [GroupDate.LAST_MONTH]: $localize`Last month`,
-      [GroupDate.OLDER]: $localize`Older`
-    }
-
-    this.resizeSub = fromEvent(window, 'resize')
-      .pipe(debounceTime(500))
+    fromEvent(window, 'resize')
+      .pipe(
+        takeUntilDestroyed(this.destroyRef),
+        debounceTime(500)
+      )
       .subscribe(() => this.calcPageSizes())
 
     this.calcPageSizes()
 
     this.userService.getAnonymousOrLoggedUser()
+      .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe(user => {
-        this.userMiniature = user
+        this.user = user
 
-        if (this.loadUserVideoPreferences) {
+        if (this.loadUserVideoPreferences()) {
           this.loadUserSettings(user)
         }
 
-        this.scheduleOnFiltersChanged(false)
-
         this.subscribeToAnonymousUpdate()
-        this.subscribeToSearchChange()
+        this.subscribeToQueryParamsChange()
+
+        this.filters.load(this.route.snapshot.queryParams)
+
+        this.filters.onChange(() => {
+          debugLogger('Filters changed', this.filters)
+
+          // We'll reload videos, but avoid weird UI effect
+          this.videos = []
+          this.highlightedLives = []
+
+          this.updateUrl()
+
+          this.reloadSyndicationItems()
+          this.reloadVideos()
+
+          this.filtersChanged.emit(this.filters)
+        })
+
+        this.handlePagination()
+        this.reloadSyndicationItems()
+
+        this.loadMoreVideos({ reset: true })
       })
-
-    // Display avatar in mobile view
-    if (this.screenService.isInMobileView()) {
-      this.displayOptions.avatar = true
-    }
-  }
-
-  ngOnDestroy () {
-    if (this.resizeSub) this.resizeSub.unsubscribe()
-    if (this.routeSub) this.routeSub.unsubscribe()
-    if (this.userSub) this.userSub.unsubscribe()
-  }
-
-  ngOnChanges (changes: SimpleChanges) {
-    if (!this.filters) return
-
-    let updated = false
-
-    if (changes['defaultScope']) {
-      updated = true
-      this.filters.setDefaultScope(this.defaultScope)
-    }
-
-    if (changes['defaultSort']) {
-      updated = true
-      this.filters.setDefaultSort(this.defaultSort)
-    }
-
-    if (!updated) return
-
-    const customizedByUser = this.hasBeenCustomizedByUser()
-
-    if (!customizedByUser) {
-      if (this.loadUserVideoPreferences) {
-        this.loadUserSettings(this.userMiniature)
-      }
-
-      this.filters.reset('scope')
-      this.filters.reset('sort')
-    }
-
-    this.scheduleOnFiltersChanged(customizedByUser)
   }
 
   videoById (_index: number, video: Video) {
     return video.id
   }
 
+  // The "Videos" section title is only rendered when a "Lives" section precedes it, so don't introduce a heading level gap otherwise
+  getVideosHeadingLevel () {
+    return this.highlightedLives.length !== 0
+      ? 3
+      : 2
+  }
+
   onNearOfBottom () {
-    if (this.disabled) return
+    if (this.disabled()) return
+
+    if (window.location.pathname === '/') {
+      this.peertubeRouter.silentNavigate([], this.route.snapshot.queryParams)
+    }
 
     // No more results
-    if (this.lastQueryLength !== undefined && this.lastQueryLength < this.pagination.itemsPerPage) return
+    if (!this.hasMoreResults()) return
 
     this.pagination.currentPage += 1
 
     this.loadMoreVideos()
   }
 
-  loadMoreVideos (reset = false) {
-    this.getVideosObservableFunction(this.pagination, this.filters)
-      .subscribe({
-        next: ({ data }) => {
-          this.hasDoneFirstQuery = true
-          this.lastQueryLength = data.length
+  hasMoreResults () {
+    if (this.lastQueryLength !== undefined && this.lastQueryLength < this.pagination.itemsPerPage) return false
 
-          if (reset) this.videos = []
-          this.videos = this.videos.concat(data)
+    return true
+  }
 
-          if (this.groupByDate) this.buildGroupedDateLabels()
+  loadMoreVideos (options: {
+    reset?: boolean
+  } = {}) {
+    const { reset = false } = options
 
-          this.onDataSubject.next(data)
-        },
+    let liveFilters: VideoFilters
+    let videoFilters: VideoFilters
 
-        error: err => {
-          const message = $localize`Cannot load more videos. Try again later.`
+    if (reset) {
+      this.hasDoneFirstQuery = false
+      this.videos = []
+      this.highlightedLives = []
+      this.groupByDateStore.clear()
 
-          console.error(message, { err })
-          this.notifier.error(message)
-        }
-      })
+      if (this.highlightLives() && (!this.filters.live || this.filters.live === 'both')) {
+        liveFilters = this.filters.clone()
+        liveFilters.live = 'true'
+
+        videoFilters = this.filters.clone()
+        videoFilters.live = 'false'
+      }
+    }
+
+    this.videoRequests.next({
+      reset,
+      obsVideos: this.getVideosObservableFunction()(this.pagination, videoFilters ?? this.filters),
+
+      obsHighlightedLives: liveFilters
+        ? this.getVideosObservableFunction()(this.pagination, liveFilters)
+        : of({ data: this.highlightedLives })
+    })
   }
 
   reloadVideos () {
-    this.pagination.currentPage = 1
-    this.loadMoreVideos(true)
+    resetCurrentPage(this.pagination)
+
+    this.loadMoreVideos({ reset: true })
   }
 
   removeVideoFromArray (video: Video) {
-    this.videos = this.videos.filter(v => v.id !== video.id)
-  }
+    if (this.videos.some(v => v.id === video.id)) {
+      this.videos = this.videos.filter(v => v.id !== video.id)
 
-  buildGroupedDateLabels () {
-    let currentGroupedDate: GroupDate = GroupDate.UNKNOWN
-
-    const periods = [
-      {
-        value: GroupDate.TODAY,
-        validator: (d: Date) => isToday(d)
-      },
-      {
-        value: GroupDate.YESTERDAY,
-        validator: (d: Date) => isYesterday(d)
-      },
-      {
-        value: GroupDate.THIS_WEEK,
-        validator: (d: Date) => isLastWeek(d)
-      },
-      {
-        value: GroupDate.THIS_MONTH,
-        validator: (d: Date) => isThisMonth(d)
-      },
-      {
-        value: GroupDate.LAST_MONTH,
-        validator: (d: Date) => isLastMonth(d)
-      },
-      {
-        value: GroupDate.OLDER,
-        validator: () => true
-      }
-    ]
-
-    for (const video of this.videos) {
-      const publishedDate = video.publishedAt
-
-      for (let i = 0; i < periods.length; i++) {
-        const period = periods[i]
-
-        if (currentGroupedDate <= period.value && period.validator(publishedDate)) {
-
-          if (currentGroupedDate !== period.value) {
-            currentGroupedDate = period.value
-            this.groupedDates[video.id] = currentGroupedDate
-          }
-
-          break
-        }
-      }
+      updatePaginationOnDelete(this.pagination)
     }
+
+    this.highlightedLives = this.highlightedLives.filter(v => v.id !== video.id)
   }
 
-  getCurrentGroupedDateLabel (video: Video) {
-    if (this.groupByDate === false) return undefined
+  getNextPageQueryParams () {
+    return {
+      ...this.route.snapshot.queryParams,
 
-    return this.groupedDateLabels[this.groupedDates[video.id]]
-  }
-
-  scheduleOnFiltersChanged (customizedByUser: boolean) {
-    // We'll reload videos, but avoid weird UI effect
-    this.videos = []
-
-    setTimeout(() => this.onFiltersChanged(customizedByUser))
-  }
-
-  onFiltersChanged (customizedByUser: boolean) {
-    logger('Running on filters changed')
-
-    this.updateUrl(customizedByUser)
-
-    this.filters.triggerChange()
-
-    this.reloadSyndicationItems()
-    this.reloadVideos()
-  }
-
-  protected enableAllFilterIfPossible () {
-    if (!this.authService.isLoggedIn()) return
-
-    this.authService.userInformationLoaded
-      .subscribe(() => {
-        const user = this.authService.getUser()
-        this.displayModerationBlock = user.hasRight(UserRight.SEE_ALL_VIDEOS)
-      })
+      page: (this.pagination.currentPage + 1) + ''
+    }
   }
 
   private calcPageSizes () {
@@ -329,74 +282,125 @@ export class VideosListComponent implements OnInit, OnChanges, OnDestroy {
   }
 
   private loadUserSettings (user: User) {
-    this.filters.setNSFWPolicy(user.nsfwPolicy)
+    this.filters.setNSFWPolicy(user)
+    this.filters.setAIUsagesHidden(user)
 
-    // Don't reset language filter if we don't want to refresh the component
-    if (!this.hasBeenCustomizedByUser()) {
-      this.filters.load({ languageOneOf: user.videoLanguages })
-    }
+    this.filters.setDefaultLanguages(user.videoLanguages)
+    this.filters.setDefaultCategories(user.videoCategories)
+    this.filters.setDefaultLive(user.videoLive)
   }
 
   private reloadSyndicationItems () {
-    Promise.resolve(this.getSyndicationItemsFunction(this.filters))
+    Promise.resolve(this.getSyndicationItemsFunction()(this.filters))
       .then(items => {
         if (!items || items.length === 0) this.syndicationItems = undefined
         else this.syndicationItems = items
       })
-      .catch(err => console.error('Cannot get syndication items.', err))
+      .catch(err => logger.error('Cannot get syndication items.', err))
   }
 
-  private updateUrl (customizedByUser: boolean) {
-    const baseQuery = this.filters.toUrlObject()
+  private updateUrl () {
+    const queryParams = this.filters.toUrlObject()
 
-    // Set or reset customized by user query param
-    const queryParams = customizedByUser || this.hasBeenCustomizedByUser()
-      ? { ...baseQuery, c: customizedByUser }
-      : baseQuery
+    debugLogger('Will inject URL query', { queryParams })
 
-    logger('Will inject %O in URL query', queryParams)
-
-    const baseRoute = this.baseRouteBuilderFunction
-      ? this.baseRouteBuilderFunction(this.filters)
-      : []
-
-    const pathname = window.location.pathname
-
-    const baseRouteChanged = baseRoute.length !== 0 &&
-                             pathname !== '/' && // Exclude special '/' case, we'll be redirected without component change
-                             baseRoute.length !== 0 && pathname !== baseRoute.join('/')
-
-    if (baseRouteChanged || Object.keys(baseQuery).length !== 0 || customizedByUser) {
-      this.peertubeRouter.silentNavigate(baseRoute, queryParams)
+    if (Object.keys(queryParams).length !== 0 || this.filters.hasBeenCustomizedByUser()) {
+      this.peertubeRouter.silentNavigate([], queryParams)
     }
-
-    this.filtersChanged.emit(this.filters)
-  }
-
-  private hasBeenCustomizedByUser () {
-    return this.route.snapshot.queryParams['c'] === 'true'
   }
 
   private subscribeToAnonymousUpdate () {
-    this.userSub = this.userService.listenAnonymousUpdate()
-      .pipe(switchMap(() => this.userService.getAnonymousOrLoggedUser()))
+    this.userService.listenAnonymousUpdate()
+      .pipe(
+        takeUntilDestroyed(this.destroyRef),
+        switchMap(() => this.userService.getAnonymousOrLoggedUser())
+      )
       .subscribe(user => {
-        if (this.loadUserVideoPreferences) {
+        debugLogger('User changed', { user })
+
+        this.user = user
+
+        let filtersChanged = false
+
+        if (this.loadUserVideoPreferences()) {
           this.loadUserSettings(user)
+
+          // Apply new default values, URL query params still have priority
+          filtersChanged = this.filters.load(this.route.snapshot.queryParams)
         }
 
-        if (this.hasDoneFirstQuery) {
+        // Videos are reloaded by the filters change callback if needed
+        if (this.hasDoneFirstQuery && !filtersChanged) {
           this.reloadVideos()
         }
       })
   }
 
-  private subscribeToSearchChange () {
-    this.routeSub = this.route.queryParams.subscribe(param => {
-      if (!param['search']) return
+  private subscribeToQueryParamsChange () {
+    this.route.queryParams
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe(params => {
+        if (Object.keys(params).length === 0 && !this.filters.hasBeenCustomizedByUser()) return
 
-      this.filters.load({ search: param['search'] })
-      this.onFiltersChanged(true)
-    })
+        debugLogger('Query params changed', params)
+
+        this.filters.load(params)
+      })
+  }
+
+  private subscribeToVideoRequests () {
+    this.videoRequests
+      .pipe(
+        concatMap(({ reset, obsHighlightedLives, obsVideos }) => {
+          return forkJoin([ obsHighlightedLives, obsVideos ])
+            .pipe(
+              map(([ resHighlightedLives, resVideos ]) => ({ highlightedLives: resHighlightedLives.data, videos: resVideos.data, reset }))
+            )
+        })
+      )
+      .subscribe({
+        next: ({ videos, highlightedLives, reset }) => {
+          this.hasDoneFirstQuery = true
+          this.lastQueryLength = videos.length
+
+          if (reset) {
+            this.videos = []
+            this.highlightedLives = highlightedLives
+          }
+
+          this.videos = this.videos.concat(videos)
+
+          this.onVideosDataSubject.next(videos)
+          this.videosLoaded.emit(this.videos)
+        },
+
+        error: err => {
+          const message = $localize`Cannot load more videos. Please try again later.`
+
+          logger.error(message, err)
+          this.notifier.error(message)
+        }
+      })
+  }
+
+  // Handle "Load more" button for SEO
+  private handlePagination () {
+    const initPage = this.route.snapshot.queryParams['page']
+
+    this.pagination.currentPage = initPage
+      ? +initPage
+      : 1
+
+    this.route.queryParams
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe(queryParams => {
+        const page = queryParams['page']
+        if (!page || +page === this.pagination.currentPage) return
+
+        resetCurrentPage(this.pagination)
+        this.pagination.currentPage = +page
+
+        this.loadMoreVideos({ reset: true })
+      })
   }
 }
